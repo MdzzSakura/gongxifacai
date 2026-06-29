@@ -6,6 +6,7 @@ build_board 接受注入的 fetcher(便于用假对象测试);run_daily 是真�
 """
 import logging
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -14,10 +15,9 @@ from gxfc.data.cache import DataFrameCache
 from gxfc.data.fetcher import Fetcher
 from gxfc.factors.market_emotion import compute_market_emotion
 from gxfc.factors.profit_fault import scan_profit_fault
-from gxfc.factors.sector import rank_sectors
+from gxfc.factors.sector import rank_sectors, core_stocks
 from gxfc.review.daily_board import DailyBoard, render_console, save_csv
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -26,10 +26,10 @@ def load_config(path: str = "config/strategy.yaml") -> dict:
 
 
 def _daily_window(date: str) -> tuple:
-    """断层检测只需最近几天日K,这里取该日往前一个月足够覆盖前一交易日。"""
-    year = int(date[:4])
-    start = f"{year}{date[4:6]}01"  # 当月1日,足够包含前一交易日
-    return start, date
+    """断层检测需要最近两个交易日,这里取该日往前 10 个自然日,保证跨月也至少覆盖前一交易日。"""
+    end_dt = datetime.strptime(date, "%Y%m%d")
+    start_dt = end_dt - timedelta(days=10)
+    return start_dt.strftime("%Y%m%d"), date
 
 
 def build_board(fetcher, date: str, quarter_end: str, config: dict,
@@ -49,21 +49,38 @@ def build_board(fetcher, date: str, quarter_end: str, config: dict,
     board_df = fetcher.industry_board()
     sectors = rank_sectors(board_df, top_n=sec_cfg["top_n"])
 
+    # 对榜单前 core_drill_top_n 个强势板块下钻,取各自核心成分股
+    sector_cores = {}
+    drill_names = list(sectors["板块名称"].head(sec_cfg["core_drill_top_n"]))
+    for name in drill_names:
+        try:
+            cons = fetcher.industry_cons(name)
+            sector_cores[name] = core_stocks(cons, core_top_n=sec_cfg["core_top_n"])
+        except Exception as err:
+            logger.warning("拉取板块 %s 成分股失败,跳过:%s", name, err)
+
     yjyg = fetcher.yjyg(quarter_end).head(top_codes_limit)
     start, end = _daily_window(date)
     daily_map = {}
     for _, r in yjyg.iterrows():
-        code = str(r["股票代码"])
+        code = r.get("股票代码")
+        if not code:
+            continue
+        code = str(code)
         try:
             daily_map[code] = fetcher.stock_daily(code, start, end)
         except Exception as err:
             logger.warning("拉取 %s 日K失败,跳过:%s", code, err)
     candidates = scan_profit_fault(yjyg, daily_map, growth_threshold=pf_cfg["growth_threshold"])
 
-    return DailyBoard(date=date, emotion=emotion, sectors=sectors, candidates=candidates)
+    return DailyBoard(
+        date=date, emotion=emotion, sectors=sectors,
+        candidates=candidates, sector_cores=sector_cores,
+    )
 
 
 def run_daily(date: str, quarter_end: str, out_dir: str = "out") -> DailyBoard:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = load_config()
     fetcher = Fetcher(cache=DataFrameCache("gxfc_cache.db"))
     board = build_board(fetcher, date, quarter_end, config)

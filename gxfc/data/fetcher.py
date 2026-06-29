@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 class Fetcher:
     def __init__(self, cache: Optional[DataFrameCache] = None, retries: int = 3):
+        if retries < 1:
+            raise ValueError("retries 必须 >= 1")
         self._cache = cache
         self._retries = retries
 
@@ -66,7 +68,7 @@ class Fetcher:
         )
 
     def yjyg(self, date: str) -> pd.DataFrame:
-        """业绩预告,含 股票简称,预测净利润-同比增长。date 形如 '20260331'(季度末)。"""
+        """业绩预告,含 股票代码,股票简称,预测净利润-同比增长。date 形如 '20260331'(季度末)。"""
         import akshare as ak
         return self.fetch(f"yjyg:{date}", lambda: ak.stock_yjyg_em(date=date))
 

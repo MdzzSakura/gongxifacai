@@ -7,6 +7,8 @@
 import pandas as pd
 
 _GROWTH_COL = "预测净利润-同比增长"
+_CODE_COL = "股票代码"
+_NAME_COL = "股票简称"
 
 
 def detect_gap(daily_df: pd.DataFrame) -> bool:
@@ -64,7 +66,10 @@ def scan_profit_fault(
     """
     rows = []
     for _, r in yjyg_df.iterrows():
-        code = str(r["股票代码"])
+        code = r.get(_CODE_COL)
+        if code is None or code == "":
+            continue
+        code = str(code)
         growth = r.get(_GROWTH_COL)
 
         # 增速不达标则跳过
@@ -84,7 +89,7 @@ def scan_profit_fault(
         rows.append(
             {
                 "股票代码": code,
-                "股票简称": r.get("股票简称", ""),
+                "股票简称": r.get(_NAME_COL, ""),
                 "同比增长": float(growth),
                 "有跳空": True,
             }
