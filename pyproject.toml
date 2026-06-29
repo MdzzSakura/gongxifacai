@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "network: 需要真实访问 AKShare 网络的测试(默认可跳过)",
+]

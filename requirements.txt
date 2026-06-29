@@ -1,0 +1,5 @@
+akshare>=1.12
+pandas>=1.5
+PyYAML>=6.0
+tabulate>=0.9
+pytest>=7.0
