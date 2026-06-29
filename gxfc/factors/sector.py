@@ -9,7 +9,7 @@ _SECTOR_COLS = ["板块名称", "涨跌幅", "领涨股"]
 _CORE_COLS = ["名称", "涨跌幅", "成交额"]
 
 
-def _keep_existing(df: pd.DataFrame, cols) -> pd.DataFrame:
+def _keep_existing(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     existing = [c for c in cols if c in df.columns]
     return df[existing]
 

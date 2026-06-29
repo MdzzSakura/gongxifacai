@@ -32,3 +32,17 @@ def test_核心成分股按涨幅降序取前N():
     out = core_stocks(cons, core_top_n=2)
     assert list(out["名称"]) == ["乙", "丙"]
     assert out.index.tolist() == [0, 1]
+
+
+def test_板块缺领涨股列时只返回存在的列():
+    board = pd.DataFrame({"板块名称": ["电力", "煤炭"], "涨跌幅": [5.6, 1.2]})
+    out = rank_sectors(board, top_n=10)
+    assert list(out.columns) == ["板块名称", "涨跌幅"]
+    assert list(out["板块名称"]) == ["电力", "煤炭"]
+
+
+def test_成分股缺成交额列时只返回存在的列():
+    cons = pd.DataFrame({"名称": ["甲", "乙"], "涨跌幅": [2.0, 9.9]})
+    out = core_stocks(cons, core_top_n=5)
+    assert list(out.columns) == ["名称", "涨跌幅"]
+    assert list(out["名称"]) == ["乙", "甲"]
