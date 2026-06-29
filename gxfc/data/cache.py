@@ -30,23 +30,17 @@ class DataFrameCache:
 
         data = json.loads(row[0])
 
-        # 新格式：包含 data 和 dtypes
-        if isinstance(data, dict) and "data" in data and "dtypes" in data:
-            # 构建 dtype 字典，将 'object' 转换为 'str'
-            dtype_map = {}
-            for col, dtype_str in data["dtypes"].items():
-                if dtype_str == "object":
-                    dtype_map[col] = "str"
-                else:
-                    dtype_map[col] = dtype_str
+        # 构建 dtype 字典，将 'object' 转换为 'str'
+        dtype_map = {}
+        for col, dtype_str in data["dtypes"].items():
+            if dtype_str == "object":
+                dtype_map[col] = "str"
+            else:
+                dtype_map[col] = dtype_str
 
-            df = pd.read_json(
-                StringIO(json.dumps(data["data"])), orient="split", dtype=dtype_map
-            )
-        else:
-            # 旧格式：直接 DataFrame JSON
-            df = pd.read_json(StringIO(row[0]), orient="split")
-
+        df = pd.read_json(
+            StringIO(json.dumps(data["data"])), orient="split", dtype=dtype_map
+        )
         return df
 
     def set(self, key: str, df: pd.DataFrame) -> None:
