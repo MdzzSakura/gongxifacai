@@ -53,6 +53,39 @@ def _sina_daily_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# 新浪行业榜(stock_sector_spot)→ 东财 industry_board 列;新浪行业成分股
+# (stock_sector_detail,英文列)→ 东财 industry_cons 列,使板块段回退对下游
+# (sector.rank_sectors / core_stocks)透明。
+_SINA_SECTOR_RENAME = {"板块": "板块名称", "股票名称": "领涨股票"}
+_SINA_DETAIL_RENAME = {"name": "名称", "changepercent": "涨跌幅", "amount": "成交额"}
+
+
+def _sina_sector_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """新浪行业榜归一化为东财板块榜列结构(板块名称/涨跌幅/领涨股票)。"""
+    return df.rename(columns=_SINA_SECTOR_RENAME)
+
+
+def _sina_detail_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """新浪行业成分股归一化为东财成分股列结构(名称/涨跌幅/成交额)。"""
+    return df.rename(columns=_SINA_DETAIL_RENAME)
+
+
+def _sina_industry_cons(board: str) -> pd.DataFrame:
+    """按东财板块名反查新浪行业 label,再下钻成分股并归一化。
+
+    build_board 传入的是中文板块名,而新浪成分股接口 stock_sector_detail 需
+    label(如 'new_blhy'),故先用 stock_sector_spot 建立 名称→label 映射。
+    板块名在新浪行业分类中不存在时抛错,由上层 fetch 重试/降级处理。
+    """
+    import akshare as ak
+    spot = ak.stock_sector_spot(indicator="新浪行业")
+    hit = spot[spot["板块"] == board] if "板块" in spot.columns else spot.iloc[0:0]
+    if hit.empty:
+        raise ValueError(f"新浪行业分类未找到板块:{board}")
+    label = hit.iloc[0]["label"]
+    return _sina_detail_to_em_schema(ak.stock_sector_detail(sector=label))
+
+
 class Fetcher:
     def __init__(
         self,
@@ -130,21 +163,43 @@ class Fetcher:
         不走缓存,保证数据实时。
         """
         import akshare as ak
-        return self.fetch("spot", ak.stock_zh_a_spot_em, use_cache=False)
+        try:
+            return self.fetch("spot", ak.stock_zh_a_spot_em, use_cache=False)
+        except Exception as em_err:
+            logger.warning("东财实时快照失败,回退新浪源:%s", em_err)
+            # 新浪 stock_zh_a_spot 自带 '涨跌幅'(float),compute_market_emotion 可直接消费
+            return self.fetch("spot", ak.stock_zh_a_spot, use_cache=False)
 
     def industry_board(self) -> pd.DataFrame:
-        """东财行业板块实时行情。
-        列含:板块名称,涨跌幅,领涨股票 等。
+        """东财行业板块实时行情。列含:板块名称,涨跌幅,领涨股票 等。
+
+        东财限流/断连时回退新浪行业榜 stock_sector_spot,归一化为东财列结构。
+        注意:新浪行业分类口径与东财不同,回退期板块名称会随之切换。
         """
         import akshare as ak
-        return self.fetch("industry_board", ak.stock_board_industry_name_em, use_cache=False)
+        try:
+            return self.fetch("industry_board", ak.stock_board_industry_name_em, use_cache=False)
+        except Exception as em_err:
+            logger.warning("东财板块榜失败,回退新浪行业榜:%s", em_err)
+            return self.fetch(
+                "industry_board",
+                lambda: _sina_sector_to_em_schema(ak.stock_sector_spot(indicator="新浪行业")),
+                use_cache=False,
+            )
 
     def industry_cons(self, board: str) -> pd.DataFrame:
-        """行业板块成分股。含 名称,涨跌幅,成交额。"""
+        """行业板块成分股。含 名称,涨跌幅,成交额。
+
+        东财失败时回退新浪:按板块名反查 label 再下钻(见 _sina_industry_cons)。
+        两源共用缓存键,任一成功即缓存。
+        """
         import akshare as ak
-        return self.fetch(
-            f"industry_cons:{board}", lambda: ak.stock_board_industry_cons_em(symbol=board)
-        )
+        key = f"industry_cons:{board}"
+        try:
+            return self.fetch(key, lambda: ak.stock_board_industry_cons_em(symbol=board))
+        except Exception as em_err:
+            logger.warning("东财板块 %s 成分股失败,回退新浪行业:%s", board, em_err)
+            return self.fetch(key, lambda: _sina_industry_cons(board))
 
     def yjyg(self, date: str) -> pd.DataFrame:
         """业绩预告。date 形如 '20260331'(季度末)。
