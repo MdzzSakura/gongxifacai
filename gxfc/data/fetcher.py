@@ -28,6 +28,14 @@ _SINA_DAILY_RENAME = {
 }
 
 
+def _is_conn_error(err: Exception) -> bool:
+    """判断是否为连接被拒类错误(东财风控掐连的典型表现),用于触发熔断。"""
+    if isinstance(err, ConnectionError):
+        return True
+    s = str(err)
+    return "RemoteDisconnected" in s or "Connection aborted" in s
+
+
 def _sina_symbol(code: str) -> str:
     """6位纯数字代码 → 新浪带市场前缀格式(sh/sz/bj)。
 
@@ -100,6 +108,9 @@ class Fetcher:
         # 东财等数据源对突发请求敏感,强制任意两次真实请求之间至少间隔 min_interval 秒
         self._min_interval = min_interval
         self._last_call = 0.0
+        # 熔断标志:一旦探测到东财行情连接被风控掐断,本次运行后续有兜底的接口
+        # 直接走新浪,不再对已知挂掉的东财反复重试,避免拖慢与刷屏。
+        self._eastmoney_down = False
 
     def _throttle(self) -> None:
         """请求节流:距上次真实请求不足 min_interval 则补足等待,摊平突发流量。"""
@@ -111,14 +122,21 @@ class Fetcher:
         self._last_call = time.monotonic()
 
     def fetch(
-        self, key: str, loader: Callable[[], pd.DataFrame], use_cache: bool = True
+        self,
+        key: str,
+        loader: Callable[[], pd.DataFrame],
+        use_cache: bool = True,
+        retries: Optional[int] = None,
     ) -> pd.DataFrame:
+        """缓存命中优先 + 失败重试。retries 不传则用实例默认;有兜底源的调用
+        可传 retries=1 让主源快速失败,把重试预算留给真正可用的回退源。"""
         if use_cache and self._cache is not None:
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
+        attempts = retries if retries is not None else self._retries
         last_err = None
-        for attempt in range(1, self._retries + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 self._throttle()
                 df = loader()
@@ -128,10 +146,38 @@ class Fetcher:
             except Exception as err:  # AKShare 抛出的异常类型不固定,统一兜底
                 last_err = err
                 logger.warning("抓取 %s 第 %d 次失败:%s", key, attempt, err)
-                if attempt < self._retries:
+                if attempt < attempts:
                     # 指数退避(1/2/4...秒,封顶8秒),给限流恢复留时间
                     time.sleep(min(8.0, 2.0 ** (attempt - 1)))
         raise last_err
+
+    def _fetch_with_fallback(
+        self,
+        key: str,
+        em_loader: Callable[[], pd.DataFrame],
+        sina_loader: Optional[Callable[[], pd.DataFrame]],
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
+        """主源东财、失败回退新浪,带熔断。
+
+        东财未熔断时只试 1 次(有兜底,不值得多次重试);若失败且为连接被拒
+        (RemoteDisconnected 等)则触发熔断,本次运行后续直接走新浪。
+        sina_loader 为 None 表示该项无可用新浪回退(如北交所日K),此时直接抛错
+        由调用方降级跳过,不做无谓重试。
+        """
+        if not self._eastmoney_down:
+            try:
+                return self.fetch(key, em_loader, use_cache=use_cache, retries=1)
+            except Exception as em_err:
+                if _is_conn_error(em_err):
+                    self._eastmoney_down = True
+                    logger.warning("东财行情连接被风控掐断,本次运行后续直接走新浪源")
+                if sina_loader is None:
+                    raise
+                logger.warning("东财 %s 失败,回退新浪源:%s", key, em_err)
+        if sina_loader is None:
+            raise RuntimeError(f"{key}:东财不可用且无新浪回退源")
+        return self.fetch(key, sina_loader, use_cache=use_cache)
 
     # —— 以下为具体业务接口,封装对应 AKShare 调用 ——
 
@@ -163,12 +209,10 @@ class Fetcher:
         不走缓存,保证数据实时。
         """
         import akshare as ak
-        try:
-            return self.fetch("spot", ak.stock_zh_a_spot_em, use_cache=False)
-        except Exception as em_err:
-            logger.warning("东财实时快照失败,回退新浪源:%s", em_err)
-            # 新浪 stock_zh_a_spot 自带 '涨跌幅'(float),compute_market_emotion 可直接消费
-            return self.fetch("spot", ak.stock_zh_a_spot, use_cache=False)
+        # 新浪 stock_zh_a_spot 自带 '涨跌幅'(float),compute_market_emotion 可直接消费
+        return self._fetch_with_fallback(
+            "spot", ak.stock_zh_a_spot_em, ak.stock_zh_a_spot, use_cache=False
+        )
 
     def industry_board(self) -> pd.DataFrame:
         """东财行业板块实时行情。列含:板块名称,涨跌幅,领涨股票 等。
@@ -177,15 +221,12 @@ class Fetcher:
         注意:新浪行业分类口径与东财不同,回退期板块名称会随之切换。
         """
         import akshare as ak
-        try:
-            return self.fetch("industry_board", ak.stock_board_industry_name_em, use_cache=False)
-        except Exception as em_err:
-            logger.warning("东财板块榜失败,回退新浪行业榜:%s", em_err)
-            return self.fetch(
-                "industry_board",
-                lambda: _sina_sector_to_em_schema(ak.stock_sector_spot(indicator="新浪行业")),
-                use_cache=False,
-            )
+        return self._fetch_with_fallback(
+            "industry_board",
+            ak.stock_board_industry_name_em,
+            lambda: _sina_sector_to_em_schema(ak.stock_sector_spot(indicator="新浪行业")),
+            use_cache=False,
+        )
 
     def industry_cons(self, board: str) -> pd.DataFrame:
         """行业板块成分股。含 名称,涨跌幅,成交额。
@@ -194,12 +235,11 @@ class Fetcher:
         两源共用缓存键,任一成功即缓存。
         """
         import akshare as ak
-        key = f"industry_cons:{board}"
-        try:
-            return self.fetch(key, lambda: ak.stock_board_industry_cons_em(symbol=board))
-        except Exception as em_err:
-            logger.warning("东财板块 %s 成分股失败,回退新浪行业:%s", board, em_err)
-            return self.fetch(key, lambda: _sina_industry_cons(board))
+        return self._fetch_with_fallback(
+            f"industry_cons:{board}",
+            lambda: ak.stock_board_industry_cons_em(symbol=board),
+            lambda: _sina_industry_cons(board),
+        )
 
     def yjyg(self, date: str) -> pd.DataFrame:
         """业绩预告。date 形如 '20260331'(季度末)。
@@ -220,20 +260,19 @@ class Fetcher:
         """
         import akshare as ak
         key = f"daily:{code}:{start}:{end}"
-        try:
-            return self.fetch(
-                key,
-                lambda: ak.stock_zh_a_hist(
-                    symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
-                ),
+        sina_sym = _sina_symbol(code)
+        # 新浪 stock_zh_a_daily 不覆盖北交所(920/8xx/4xx),此类无可用回退源
+        sina_loader = None if sina_sym.startswith("bj") else (
+            lambda: _sina_daily_to_em_schema(
+                ak.stock_zh_a_daily(
+                    symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"
+                )
             )
-        except Exception as em_err:
-            logger.warning("东财日K %s 失败,回退新浪源:%s", code, em_err)
-            return self.fetch(
-                key,
-                lambda: _sina_daily_to_em_schema(
-                    ak.stock_zh_a_daily(
-                        symbol=_sina_symbol(code), start_date=start, end_date=end, adjust="qfq"
-                    )
-                ),
-            )
+        )
+        return self._fetch_with_fallback(
+            key,
+            lambda: ak.stock_zh_a_hist(
+                symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
+            ),
+            sina_loader,
+        )

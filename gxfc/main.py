@@ -47,9 +47,14 @@ def build_board(fetcher, date: str, quarter_end: str, config: dict,
         zt = fetcher.zt_pool(date)
         dt = fetcher.dt_pool(date)
         zb = fetcher.zb_pool(date)
-        # TODO: 阶段2可接 spot=fetcher.spot() 以获取全市场涨跌家数,但东财限流敏感
+        # 全market快照用于统计涨跌家数;单独容错,失败只丢家数不影响涨跌停口径
+        try:
+            spot_df = fetcher.spot()
+        except Exception as err:
+            logger.warning("获取实时快照失败,涨跌家数降级为空:%s", err)
+            spot_df = None
         emotion = compute_market_emotion(
-            zt, dt, zb, spot_df=None,
+            zt, dt, zb, spot_df=spot_df,
             hot_up_count=emo_cfg["hot_up_count"],
             cold_up_count=emo_cfg["cold_up_count"],
         )

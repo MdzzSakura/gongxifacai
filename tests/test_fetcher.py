@@ -175,3 +175,39 @@ def test_东财成分股失败时回退新浪并按名反查label(tmp_path, monk
     assert captured["label"] == "new_blhy"
     assert {"名称", "涨跌幅", "成交额"} <= set(df.columns)
     assert df.iloc[0]["名称"] == "旗滨集团"
+
+
+def test_东财连接被掐后熔断_后续不再尝试东财(monkeypatch):
+    import akshare as ak
+    fetcher = Fetcher(cache=None, retries=3, min_interval=0)
+    em_calls = {"n": 0}
+
+    def 东财断(**k):
+        em_calls["n"] += 1
+        raise ConnectionError("RemoteDisconnected")
+
+    def 新浪日K(**k):
+        return pd.DataFrame({
+            "date": ["2026-06-29"], "open": [1.0], "high": [1.0], "low": [1.0],
+            "close": [1.0], "volume": [1], "amount": [1], "turnover": [0.1],
+        })
+
+    monkeypatch.setattr(ak, "stock_zh_a_hist", 东财断)
+    monkeypatch.setattr(ak, "stock_zh_a_daily", 新浪日K)
+
+    fetcher.stock_daily("000001", "20260620", "20260630")   # 首次触发熔断
+    assert em_calls["n"] == 1   # 有兜底,东财只试 1 次(不再重试 3 次)
+    fetcher.stock_daily("600000", "20260620", "20260630")   # 熔断后
+    assert em_calls["n"] == 1   # 完全跳过东财,直接走新浪
+
+
+def test_北交所日K无新浪回退源_快速失败不重试(monkeypatch):
+    import akshare as ak
+    fetcher = Fetcher(cache=None, retries=3, min_interval=0)
+    monkeypatch.setattr(
+        ak, "stock_zh_a_hist",
+        lambda **k: (_ for _ in ()).throw(ConnectionError("RemoteDisconnected")),
+    )
+    monkeypatch.setattr(ak, "stock_zh_a_daily", lambda **k: pytest.fail("北交所不应调用新浪"))
+    with pytest.raises(Exception):
+        fetcher.stock_daily("920136", "20260620", "20260630")

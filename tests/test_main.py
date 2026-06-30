@@ -29,6 +29,10 @@ class FakeFetcher:
     def zb_pool(self, date):
         return pd.DataFrame({"代码": ["000011"], "名称": ["炸板测试"]})  # 1 炸板
 
+    def spot(self):
+        # 全市场快照:2 涨 1 跌 1 平,用于统计涨跌家数
+        return pd.DataFrame({"涨跌幅": [3.0, -1.0, 0.0, 2.5]})
+
     def industry_board(self):
         return pd.DataFrame(
             {
@@ -76,9 +80,10 @@ def test_组装面板包含情绪板块与候选():
     cfg = load_config()
     board = build_board(FakeFetcher(), "20260629", "20260331", cfg)
     assert board.date == "20260629"
-    # 无 spot_df,up_count 为 None;用 limit_up 验证情绪计算成功(3 涨停股)
+    # limit_up 来自涨停池(3 涨停股);up/down_count 来自 spot 快照(2 涨 1 跌)
     assert board.emotion.limit_up == 3
-    assert board.emotion.up_count is None
+    assert board.emotion.up_count == 2
+    assert board.emotion.down_count == 1
     assert list(board.sectors["板块名称"])[0] == "电力"
     # 仅 000001:净利润增速 80%≥50% 且跳空
     assert list(board.candidates["股票代码"]) == ["000001"]
