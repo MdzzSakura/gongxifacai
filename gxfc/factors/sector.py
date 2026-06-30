@@ -5,7 +5,7 @@
 """
 import pandas as pd
 
-_SECTOR_COLS = ["板块名称", "涨跌幅", "领涨股"]
+_SECTOR_COLS = ["板块名称", "涨跌幅", "领涨股票"]
 _CORE_COLS = ["名称", "涨跌幅", "成交额"]
 
 

@@ -3,12 +3,17 @@
 净利润断层 = 业绩超预期 + 次日跳空缺口。受限于 AKShare 无券商一致预期,
 "超预期"用"预告净利润同比增速≥阈值"作为 proxy(单季度/预告口径)。
 跳空缺口 = 出业绩后下一交易日 今开 > 昨高。
+
+AKShare stock_yjyg_em 返回多行结构,每只股票含多个预测指标行;
+净利润增速取 预测指标=='归属于上市公司股东的净利润' 那行的 业绩变动幅度(%)。
 """
 import pandas as pd
 
-_GROWTH_COL = "预测净利润-同比增长"
 _CODE_COL = "股票代码"
 _NAME_COL = "股票简称"
+_METRIC_COL = "预测指标"
+_GROWTH_COL = "业绩变动幅度"
+_NET_PROFIT = "归属于上市公司股东的净利润"
 
 
 def detect_gap(daily_df: pd.DataFrame) -> bool:
@@ -55,17 +60,25 @@ def scan_profit_fault(
 ) -> pd.DataFrame:
     """扫描满足净利润断层条件的股票。
 
+    yjyg_df 为多行结构(每只股票含多个预测指标行);仅取
+    预测指标=='归属于上市公司股东的净利润' 的行参与筛选,
+    其余指标行(营业收入、扣非等)直接跳过。
+
     Args:
-        yjyg_df: 业绩预告数据,需包含'股票代码','股票简称','预测净利润-同比增长'列
+        yjyg_df: 业绩预告数据,含'股票代码','股票简称','预测指标','业绩变动幅度'列
         daily_map: {股票代码: daily_df} 日K线数据字典
         growth_threshold: 增速达标阈值,默认 50.0
 
     Returns:
         DataFrame,列为'股票代码','股票简称','同比增长','有跳空',已重置索引
-        仅包含增速达标 且 存在跳空缺口的候选
+        仅包含净利润增速达标 且 存在跳空缺口的候选
     """
     rows = []
     for _, r in yjyg_df.iterrows():
+        # 跳过非净利润指标行
+        if r.get(_METRIC_COL) != _NET_PROFIT:
+            continue
+
         code = r.get(_CODE_COL)
         if code is None or code == "":
             continue

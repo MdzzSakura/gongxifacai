@@ -1,24 +1,41 @@
+"""主流程集成测试。
+
+FakeFetcher 使用三个涨跌停池接口(zt_pool/dt_pool/zb_pool)替代已坏的
+market_activity;yjyg 返回真实多行结构(每票含净利润行 + 营收行);
+industry_board 使用真实列名 '领涨股票'。
+
+注意:build_board 内部含 time.sleep(0.3) 礼貌延迟;
+FakeFetcher 故意将 yjyg 只给 2 只股票,使日K 拉取次数 N=2,
+总 sleep ≤ 1.2s 属可接受范围。
+"""
 import pandas as pd
 import pytest
 from gxfc.data.fetcher import Fetcher
 from gxfc.main import _daily_window, build_board, load_config
 
+_NET = "归属于上市公司股东的净利润"
+_REV = "营业收入"
+
 
 class FakeFetcher:
     """返回固定样本的假 Fetcher,模拟各接口。"""
 
-    def market_activity(self):
-        return pd.DataFrame(
-            {"item": ["上涨", "下跌", "涨停", "跌停", "炸板"],
-             "value": [3000, 1800, 40, 5, 10]}
-        )
-
     def zt_pool(self, date):
-        return pd.DataFrame({"连板数": [1, 2, 5]})
+        return pd.DataFrame({"连板数": [1, 2, 5]})   # 3 涨停,最高5板
+
+    def dt_pool(self, date):
+        return pd.DataFrame({"代码": ["600010"], "名称": ["跌停测试"]})  # 1 跌停
+
+    def zb_pool(self, date):
+        return pd.DataFrame({"代码": ["000011"], "名称": ["炸板测试"]})  # 1 炸板
 
     def industry_board(self):
         return pd.DataFrame(
-            {"板块名称": ["电力", "煤炭"], "涨跌幅": [5.6, 1.2], "领涨股": ["B", "A"]}
+            {
+                "板块名称": ["电力", "煤炭"],
+                "涨跌幅": [5.6, 1.2],
+                "领涨股票": ["B", "A"],  # 真实列名
+            }
         )
 
     def industry_cons(self, board):
@@ -27,9 +44,15 @@ class FakeFetcher:
         )
 
     def yjyg(self, date):
+        # 多行结构:每只股票含净利润行 + 营收行
         return pd.DataFrame(
-            {"股票代码": ["000001", "000002"], "股票简称": ["甲", "乙"],
-             "预测净利润-同比增长": [80.0, 30.0]}
+            {
+                "股票代码": ["000001", "000001", "000002", "000002"],
+                "股票简称": ["甲", "甲", "乙", "乙"],
+                "预测指标": [_NET, _REV, _NET, _REV],
+                "业绩变动幅度": [80.0, 120.0, 30.0, 60.0],
+                # 000001 净利润+80% → 达标;000002 净利润+30% → 不达标
+            }
         )
 
     def stock_daily(self, code, start, end):
@@ -53,9 +76,11 @@ def test_组装面板包含情绪板块与候选():
     cfg = load_config()
     board = build_board(FakeFetcher(), "20260629", "20260331", cfg)
     assert board.date == "20260629"
-    assert board.emotion.up_count == 3000
+    # 无 spot_df,up_count 为 None;用 limit_up 验证情绪计算成功(3 涨停股)
+    assert board.emotion.limit_up == 3
+    assert board.emotion.up_count is None
     assert list(board.sectors["板块名称"])[0] == "电力"
-    # 仅 000001 增速达标且跳空
+    # 仅 000001:净利润增速 80%≥50% 且跳空
     assert list(board.candidates["股票代码"]) == ["000001"]
     # 核心成分股已接入,键为榜单前几名板块
     assert board.sector_cores

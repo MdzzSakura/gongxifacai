@@ -1,3 +1,7 @@
+"""板块因子测试。
+
+列名 '领涨股票' 与 AKShare 1.17.83 stock_board_industry_name_em 实际返回对齐。
+"""
 import pandas as pd
 from gxfc.factors.sector import rank_sectors, core_stocks
 
@@ -7,7 +11,7 @@ def test_板块按涨幅降序取前N():
         {
             "板块名称": ["煤炭", "电力", "稀土", "银行"],
             "涨跌幅": [1.2, 5.6, 3.3, -0.4],
-            "领涨股": ["A", "B", "C", "D"],
+            "领涨股票": ["A", "B", "C", "D"],
         }
     )
     out = rank_sectors(board, top_n=2)
@@ -16,7 +20,7 @@ def test_板块按涨幅降序取前N():
 
 
 def test_板块top_n超过数量时返回全部():
-    board = pd.DataFrame({"板块名称": ["X"], "涨跌幅": [1.0], "领涨股": ["a"]})
+    board = pd.DataFrame({"板块名称": ["X"], "涨跌幅": [1.0], "领涨股票": ["a"]})
     out = rank_sectors(board, top_n=10)
     assert len(out) == 1
 
@@ -34,7 +38,8 @@ def test_核心成分股按涨幅降序取前N():
     assert out.index.tolist() == [0, 1]
 
 
-def test_板块缺领涨股列时只返回存在的列():
+def test_板块缺领涨股票列时只返回存在的列():
+    """AKShare 返回列缺失时应容错,只保留已有列。"""
     board = pd.DataFrame({"板块名称": ["电力", "煤炭"], "涨跌幅": [5.6, 1.2]})
     out = rank_sectors(board, top_n=10)
     assert list(out.columns) == ["板块名称", "涨跌幅"]
