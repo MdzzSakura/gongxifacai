@@ -1,12 +1,18 @@
-"""AKShare 数据抓取封装。
+"""数据抓取封装(多源)。
 
-所有对 AKShare 的调用集中在本文件,接口名变动只改这里。
-通用 fetch 提供"缓存命中优先 + 失败重试"语义;具体业务方法各自传入
-对应的 AKShare loader。业务方法用到的列名见各方法 docstring。
+对外数据调用集中在本文件,接口/源变动只改这里。通用 fetch 提供"缓存命中优先 +
+失败重试"语义;_fetch_first_ok 按优先级在多个数据源间自动回退。业务方法用到的
+列名见各方法 docstring。各源结果统一归一化为东财列结构,对下游透明。
+
+源稳定性:个股日K 优先 Baostock(自有服务器,不爬东财→不受东财风控),失败再
+回退新浪、东财;板块/实时快照 主东财、回退新浪;涨跌停池为东财独有(push2ex),
+免费渠道无替代,断连时由调用方降级或吃缓存。
 """
+import contextlib
+import io
 import logging
 import time
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -26,6 +32,61 @@ _SINA_DAILY_RENAME = {
     "amount": "成交额",
     "turnover": "换手率",
 }
+
+
+# Baostock 日K(英文列、数值为字符串)→ 东财中文列。Baostock 自有服务器,
+# 不爬东财,是免费里最稳的日K源;仅覆盖沪深,不含北交所。
+_BAOSTOCK_RENAME = {
+    "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
+    "close": "收盘", "volume": "成交量", "amount": "成交额",
+}
+
+
+def _baostock_symbol(code: str) -> str:
+    """6位代码 → Baostock 格式(sh./sz.)。仅沪深:6/9→sh,其余→sz。"""
+    code = str(code).strip().zfill(6)
+    prefix = "sh" if code[0] in ("6", "9") else "sz"
+    return f"{prefix}.{code}"
+
+
+def _baostock_daily_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Baostock 日K归一化为东财列结构;数值列转 float,日期保持 'YYYY-MM-DD'。"""
+    out = df.rename(columns=_BAOSTOCK_RENAME)
+    for col in ("开盘", "最高", "最低", "收盘", "成交量", "成交额"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
+def _baostock_daily(code: str, start: str, end: str) -> pd.DataFrame:
+    """Baostock 前复权日K,归一化为东财列结构。
+
+    code 为6位纯数字;start/end 形如 '20260101'。空结果/查询错误抛异常,
+    由 _fetch_first_ok 转下一个源。Baostock 的 login/logout 会打印到 stdout,
+    这里重定向吞掉以保持控制台干净。
+    """
+    import baostock as bs
+    sym = _baostock_symbol(code)
+    s = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
+    e = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs.login()
+        try:
+            rs = bs.query_history_k_data_plus(
+                sym, "date,open,high,low,close,volume,amount",
+                start_date=s, end_date=e, frequency="d", adjustflag="2",  # 2=前复权
+            )
+            if rs.error_code != "0":
+                raise RuntimeError(f"baostock 查询失败:{rs.error_msg}")
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+        finally:
+            bs.logout()
+    df = pd.DataFrame(rows, columns=rs.fields)
+    if df.empty:
+        raise RuntimeError(f"baostock 无数据:{sym}")
+    return _baostock_daily_to_em_schema(df)
 
 
 def _is_conn_error(err: Exception) -> bool:
@@ -151,33 +212,40 @@ class Fetcher:
                     time.sleep(min(8.0, 2.0 ** (attempt - 1)))
         raise last_err
 
-    def _fetch_with_fallback(
+    def _fetch_first_ok(
         self,
         key: str,
-        em_loader: Callable[[], pd.DataFrame],
-        sina_loader: Optional[Callable[[], pd.DataFrame]],
+        sources: List[Tuple],
         use_cache: bool = True,
     ) -> pd.DataFrame:
-        """主源东财、失败回退新浪,带熔断。
+        """按优先级依次尝试多个数据源,首个成功即缓存返回。
 
-        东财未熔断时只试 1 次(有兜底,不值得多次重试);若失败且为连接被拒
-        (RemoteDisconnected 等)则触发熔断,本次运行后续直接走新浪。
-        sina_loader 为 None 表示该项无可用新浪回退(如北交所日K),此时直接抛错
-        由调用方降级跳过,不做无谓重试。
+        sources 为有序列表,每项 (名称, loader) 或 (名称, loader, is_eastmoney)。
+        东财源:熔断后跳过;只试 1 次(易风控,有后续兜底则不值得多试);失败且为
+        连接被拒(RemoteDisconnected 等)时触发熔断,本次运行后续跳过所有东财源。
+        非东财源:作为最后兜底时用默认 retries(值得多试),否则只试 1 次。
+        全部失败抛最后一个异常,由调用方降级跳过。
         """
-        if not self._eastmoney_down:
+        last_err: Optional[Exception] = None
+        n = len(sources)
+        for i, src in enumerate(sources):
+            name, loader = src[0], src[1]
+            is_em = src[2] if len(src) > 2 else False
+            if is_em and self._eastmoney_down:
+                continue
+            is_last = i == n - 1
+            retries = None if (is_last and not is_em) else 1
             try:
-                return self.fetch(key, em_loader, use_cache=use_cache, retries=1)
-            except Exception as em_err:
-                if _is_conn_error(em_err):
+                return self.fetch(key, loader, use_cache=use_cache, retries=retries)
+            except Exception as err:
+                last_err = err
+                if is_em and _is_conn_error(err):
                     self._eastmoney_down = True
-                    logger.warning("东财行情连接被风控掐断,本次运行后续直接走新浪源")
-                if sina_loader is None:
-                    raise
-                logger.warning("东财 %s 失败,回退新浪源:%s", key, em_err)
-        if sina_loader is None:
-            raise RuntimeError(f"{key}:东财不可用且无新浪回退源")
-        return self.fetch(key, sina_loader, use_cache=use_cache)
+                    logger.warning("东财行情连接被风控掐断,本次运行后续跳过东财源")
+                logger.warning("%s 源 %s 失败:%s", name, key, err)
+        if last_err is None:
+            raise RuntimeError(f"{key}:无可用数据源")
+        raise last_err
 
     # —— 以下为具体业务接口,封装对应 AKShare 调用 ——
 
@@ -210,8 +278,10 @@ class Fetcher:
         """
         import akshare as ak
         # 新浪 stock_zh_a_spot 自带 '涨跌幅'(float),compute_market_emotion 可直接消费
-        return self._fetch_with_fallback(
-            "spot", ak.stock_zh_a_spot_em, ak.stock_zh_a_spot, use_cache=False
+        return self._fetch_first_ok(
+            "spot",
+            [("东财", ak.stock_zh_a_spot_em, True), ("新浪", ak.stock_zh_a_spot)],
+            use_cache=False,
         )
 
     def industry_board(self) -> pd.DataFrame:
@@ -221,10 +291,12 @@ class Fetcher:
         注意:新浪行业分类口径与东财不同,回退期板块名称会随之切换。
         """
         import akshare as ak
-        return self._fetch_with_fallback(
+        return self._fetch_first_ok(
             "industry_board",
-            ak.stock_board_industry_name_em,
-            lambda: _sina_sector_to_em_schema(ak.stock_sector_spot(indicator="新浪行业")),
+            [
+                ("东财", ak.stock_board_industry_name_em, True),
+                ("新浪", lambda: _sina_sector_to_em_schema(ak.stock_sector_spot(indicator="新浪行业"))),
+            ],
             use_cache=False,
         )
 
@@ -235,10 +307,12 @@ class Fetcher:
         两源共用缓存键,任一成功即缓存。
         """
         import akshare as ak
-        return self._fetch_with_fallback(
+        return self._fetch_first_ok(
             f"industry_cons:{board}",
-            lambda: ak.stock_board_industry_cons_em(symbol=board),
-            lambda: _sina_industry_cons(board),
+            [
+                ("东财", lambda: ak.stock_board_industry_cons_em(symbol=board), True),
+                ("新浪", lambda: _sina_industry_cons(board)),
+            ],
         )
 
     def yjyg(self, date: str) -> pd.DataFrame:
@@ -254,25 +328,24 @@ class Fetcher:
     def stock_daily(self, code: str, start: str, end: str) -> pd.DataFrame:
         """个股前复权日K。含 日期,开盘,最高。start/end 形如 '20260101'。
 
-        主源东财 stock_zh_a_hist;东财限流/断连(RemoteDisconnected)时自动回退
-        新浪 stock_zh_a_daily,并把新浪结果归一化为东财列结构,对下游透明。
-        两源同用一个缓存键:任一源成功即写入缓存,下次直接命中不再触网。
+        数据源优先级:Baostock(自有服务器最稳,仅沪深)→ 新浪 → 东财。北交所
+        (920/8xx/4xx)Baostock/新浪均不支持,仅能尝试东财。各源结果归一化为东财
+        列结构,共用一个缓存键:任一源成功即写入,下次直接命中不再触网。
         """
         import akshare as ak
         key = f"daily:{code}:{start}:{end}"
         sina_sym = _sina_symbol(code)
-        # 新浪 stock_zh_a_daily 不覆盖北交所(920/8xx/4xx),此类无可用回退源
-        sina_loader = None if sina_sym.startswith("bj") else (
-            lambda: _sina_daily_to_em_schema(
-                ak.stock_zh_a_daily(
-                    symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"
-                )
-            )
+        em_loader = lambda: ak.stock_zh_a_hist(
+            symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
         )
-        return self._fetch_with_fallback(
-            key,
-            lambda: ak.stock_zh_a_hist(
-                symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
-            ),
-            sina_loader,
-        )
+        if sina_sym.startswith("bj"):
+            # 北交所:免费源 Baostock/新浪 均不覆盖,仅东财可能有
+            sources = [("东财", em_loader, True)]
+        else:
+            sources = [
+                ("baostock", lambda: _baostock_daily(code, start, end)),
+                ("新浪", lambda: _sina_daily_to_em_schema(
+                    ak.stock_zh_a_daily(symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"))),
+                ("东财", em_loader, True),
+            ]
+        return self._fetch_first_ok(key, sources)

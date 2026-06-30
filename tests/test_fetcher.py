@@ -1,12 +1,15 @@
 import pandas as pd
 import pytest
 from gxfc.data.cache import DataFrameCache
+import gxfc.data.fetcher as fetcher_mod
 from gxfc.data.fetcher import (
     Fetcher,
     _sina_symbol,
     _sina_daily_to_em_schema,
     _sina_sector_to_em_schema,
     _sina_detail_to_em_schema,
+    _baostock_symbol,
+    _baostock_daily_to_em_schema,
 )
 
 
@@ -75,13 +78,52 @@ def test_新浪日K归一化为东财列结构():
     assert list(em["日期"]) == ["2026-06-26", "2026-06-29"]
 
 
-def test_东财日K失败时回退新浪并归一化(tmp_path, monkeypatch):
-    import akshare as ak
-    cache = DataFrameCache(str(tmp_path / "d.db"))
-    fetcher = Fetcher(cache=cache, retries=1, min_interval=0)
+def test_baostock代码前缀映射():
+    assert _baostock_symbol("000001") == "sz.000001"   # 深
+    assert _baostock_symbol("300750") == "sz.300750"   # 创业板
+    assert _baostock_symbol("603435") == "sh.603435"   # 沪
+    assert _baostock_symbol("688981") == "sh.688981"   # 科创板
 
-    def 东财失败(**kwargs):
-        raise RuntimeError("Connection aborted RemoteDisconnected")
+
+def test_baostock日K归一化为东财列并转数值():
+    # baostock 数值以字符串返回
+    bao = pd.DataFrame({
+        "date": ["2026-06-26", "2026-06-29"],
+        "open": ["62.88", "64.45"], "high": ["63.38", "65.20"], "low": ["58.88", "64.45"],
+        "close": ["59.27", "65.20"], "volume": ["3665070", "6247219"],
+        "amount": ["220254957.17", "406823970.50"],
+    })
+    em = _baostock_daily_to_em_schema(bao)
+    assert {"日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"} <= set(em.columns)
+    assert em["开盘"].dtype.kind == "f"   # 已转 float
+    assert list(em["日期"]) == ["2026-06-26", "2026-06-29"]
+
+
+def test_日K优先用baostock_其他源不触发(tmp_path, monkeypatch):
+    import akshare as ak
+    fetcher = Fetcher(cache=DataFrameCache(str(tmp_path / "d.db")), retries=1, min_interval=0)
+    monkeypatch.setattr(
+        fetcher_mod, "_baostock_daily",
+        lambda code, s, e: pd.DataFrame({"日期": ["2026-06-29"], "开盘": [64.0], "最高": [65.2]}),
+    )
+    monkeypatch.setattr(ak, "stock_zh_a_daily", lambda **k: pytest.fail("不应调用新浪"))
+    monkeypatch.setattr(ak, "stock_zh_a_hist", lambda **k: pytest.fail("不应调用东财"))
+
+    df = fetcher.stock_daily("001237", "20260620", "20260630")
+    assert list(df["日期"]) == ["2026-06-29"]
+    # 已缓存:再次调用即便 baostock 也设为失败仍命中
+    monkeypatch.setattr(fetcher_mod, "_baostock_daily", lambda *a: pytest.fail("应命中缓存"))
+    again = fetcher.stock_daily("001237", "20260620", "20260630")
+    assert list(again["日期"]) == ["2026-06-29"]
+
+
+def test_日K_baostock失败回退新浪并归一化(tmp_path, monkeypatch):
+    import akshare as ak
+    fetcher = Fetcher(cache=DataFrameCache(str(tmp_path / "d2.db")), retries=1, min_interval=0)
+    monkeypatch.setattr(
+        fetcher_mod, "_baostock_daily",
+        lambda code, s, e: (_ for _ in ()).throw(RuntimeError("baostock 无数据")),
+    )
 
     def 新浪成功(symbol, **kwargs):
         assert symbol == "sz001237"  # 6位代码应转成带前缀
@@ -91,17 +133,12 @@ def test_东财日K失败时回退新浪并归一化(tmp_path, monkeypatch):
             "close": [59.0, 65.0], "volume": [1, 2], "amount": [3, 4], "turnover": [0.1, 0.2],
         })
 
-    monkeypatch.setattr(ak, "stock_zh_a_hist", 东财失败)
     monkeypatch.setattr(ak, "stock_zh_a_daily", 新浪成功)
+    monkeypatch.setattr(ak, "stock_zh_a_hist", lambda **k: pytest.fail("不应走到东财"))
 
     df = fetcher.stock_daily("001237", "20260620", "20260630")
-    # 回退结果对下游透明:含东财中文列,可直接喂给 detect_gap
     assert "日期" in df.columns and "开盘" in df.columns and "最高" in df.columns
     assert list(df["日期"]) == ["2026-06-26", "2026-06-29"]
-    # 成功结果应已写入缓存:再次调用直接命中,不再触发任何源
-    monkeypatch.setattr(ak, "stock_zh_a_daily", lambda **k: pytest.fail("不应再触网"))
-    again = fetcher.stock_daily("001237", "20260620", "20260630")
-    assert list(again["日期"]) == ["2026-06-26", "2026-06-29"]
 
 
 def test_新浪行业榜归一化为东财板块榜列():
@@ -177,37 +214,37 @@ def test_东财成分股失败时回退新浪并按名反查label(tmp_path, monk
     assert df.iloc[0]["名称"] == "旗滨集团"
 
 
-def test_东财连接被掐后熔断_后续不再尝试东财(monkeypatch):
+def test_东财连接被掐后熔断_后续跳过东财(monkeypatch):
     import akshare as ak
     fetcher = Fetcher(cache=None, retries=3, min_interval=0)
     em_calls = {"n": 0}
 
-    def 东财断(**k):
+    def 板块东财断():
         em_calls["n"] += 1
         raise ConnectionError("RemoteDisconnected")
 
-    def 新浪日K(**k):
-        return pd.DataFrame({
-            "date": ["2026-06-29"], "open": [1.0], "high": [1.0], "low": [1.0],
-            "close": [1.0], "volume": [1], "amount": [1], "turnover": [0.1],
-        })
+    monkeypatch.setattr(ak, "stock_board_industry_name_em", 板块东财断)
+    monkeypatch.setattr(
+        ak, "stock_sector_spot",
+        lambda indicator: pd.DataFrame({
+            "label": ["x"], "板块": ["甲"], "涨跌幅": [1.0], "股票名称": ["S"],
+        }),
+    )
 
-    monkeypatch.setattr(ak, "stock_zh_a_hist", 东财断)
-    monkeypatch.setattr(ak, "stock_zh_a_daily", 新浪日K)
-
-    fetcher.stock_daily("000001", "20260620", "20260630")   # 首次触发熔断
+    fetcher.industry_board()   # 首次触发熔断
     assert em_calls["n"] == 1   # 有兜底,东财只试 1 次(不再重试 3 次)
-    fetcher.stock_daily("600000", "20260620", "20260630")   # 熔断后
+    fetcher.industry_board()   # 熔断后
     assert em_calls["n"] == 1   # 完全跳过东财,直接走新浪
 
 
-def test_北交所日K无新浪回退源_快速失败不重试(monkeypatch):
+def test_北交所日K仅尝试东财_免费源不调用(monkeypatch):
     import akshare as ak
     fetcher = Fetcher(cache=None, retries=3, min_interval=0)
+    monkeypatch.setattr(fetcher_mod, "_baostock_daily", lambda *a: pytest.fail("北交所不应调用baostock"))
+    monkeypatch.setattr(ak, "stock_zh_a_daily", lambda **k: pytest.fail("北交所不应调用新浪"))
     monkeypatch.setattr(
         ak, "stock_zh_a_hist",
         lambda **k: (_ for _ in ()).throw(ConnectionError("RemoteDisconnected")),
     )
-    monkeypatch.setattr(ak, "stock_zh_a_daily", lambda **k: pytest.fail("北交所不应调用新浪"))
     with pytest.raises(Exception):
         fetcher.stock_daily("920136", "20260620", "20260630")
