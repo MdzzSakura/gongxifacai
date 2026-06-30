@@ -10,11 +10,12 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 from gxfc.data.cache import DataFrameCache
 from gxfc.data.fetcher import Fetcher
-from gxfc.factors.market_emotion import compute_market_emotion
+from gxfc.factors.market_emotion import MarketEmotion, compute_market_emotion
 from gxfc.factors.profit_fault import scan_profit_fault
 from gxfc.factors.sector import rank_sectors, core_stocks
 from gxfc.review.daily_board import DailyBoard, render_console, save_csv
@@ -39,49 +40,67 @@ def build_board(fetcher, date: str, quarter_end: str, config: dict,
     sec_cfg = config["sector"]
     pf_cfg = config["profit_fault"]
 
-    # 从三个涨跌停池计算市场情绪(legu 接口在 AKShare 1.17.83 已坏)
-    zt = fetcher.zt_pool(date)
-    dt = fetcher.dt_pool(date)
-    zb = fetcher.zb_pool(date)
-    # TODO: 阶段2可接 spot=fetcher.spot() 以获取全市场涨跌家数,但东财限流敏感
-    spot = None
-    emotion = compute_market_emotion(
-        zt, dt, zb, spot_df=spot,
-        hot_up_count=emo_cfg["hot_up_count"],
-        cold_up_count=emo_cfg["cold_up_count"],
-    )
+    # 各段独立降级:单一数据源失败只影响该段,不阻塞整个面板
 
-    board_df = fetcher.industry_board()
-    sectors = rank_sectors(board_df, top_n=sec_cfg["top_n"])
+    # 1) 市场情绪(从三个涨跌停池计算;legu 接口在 AKShare 1.17.83 已坏)
+    try:
+        zt = fetcher.zt_pool(date)
+        dt = fetcher.dt_pool(date)
+        zb = fetcher.zb_pool(date)
+        # TODO: 阶段2可接 spot=fetcher.spot() 以获取全市场涨跌家数,但东财限流敏感
+        emotion = compute_market_emotion(
+            zt, dt, zb, spot_df=None,
+            hot_up_count=emo_cfg["hot_up_count"],
+            cold_up_count=emo_cfg["cold_up_count"],
+        )
+    except Exception as err:
+        logger.warning("获取市场情绪失败,该段降级:%s", err)
+        emotion = MarketEmotion(
+            up_count=None, down_count=None, limit_up=0, limit_down=0,
+            broken_board_rate=0.0, highest_streak=0,
+            volume_state="数据不足", sentiment_hint="情绪数据获取失败",
+        )
 
-    # 对榜单前 core_drill_top_n 个强势板块下钻,取各自核心成分股
+    # 2) 板块涨幅榜 + 核心成分股下钻
     sector_cores = {}
-    drill_names = list(sectors["板块名称"].head(sec_cfg["core_drill_top_n"]))
-    for name in drill_names:
-        try:
-            cons = fetcher.industry_cons(name)
-            sector_cores[name] = core_stocks(cons, core_top_n=sec_cfg["core_top_n"])
-            time.sleep(0.3)  # 礼貌延迟,避免东财限流
-        except Exception as err:
-            logger.warning("拉取板块 %s 成分股失败,跳过:%s", name, err)
+    try:
+        board_df = fetcher.industry_board()
+        sectors = rank_sectors(board_df, top_n=sec_cfg["top_n"])
+        drill_names = list(sectors["板块名称"].head(sec_cfg["core_drill_top_n"]))
+        for name in drill_names:
+            try:
+                cons = fetcher.industry_cons(name)
+                sector_cores[name] = core_stocks(cons, core_top_n=sec_cfg["core_top_n"])
+                time.sleep(0.3)  # 礼貌延迟,避免东财限流
+            except Exception as err:
+                logger.warning("拉取板块 %s 成分股失败,跳过:%s", name, err)
+    except Exception as err:
+        logger.warning("获取板块榜失败,该段降级为空:%s", err)
+        sectors = pd.DataFrame(columns=["板块名称", "涨跌幅", "领涨股票"])
 
-    yjyg = fetcher.yjyg(quarter_end).head(top_codes_limit)
-    start, end = _daily_window(date)
-    daily_map = {}
-    seen_codes: set = set()
-    for _, r in yjyg.iterrows():
-        code = r.get("股票代码")
-        if not code:
-            continue
-        code = str(code)
-        if code in seen_codes:
-            continue  # 多行结构中同一股票只拉一次日K
-        seen_codes.add(code)
-        try:
-            daily_map[code] = fetcher.stock_daily(code, start, end)
-            time.sleep(0.3)  # 礼貌延迟,避免东财限流
-        except Exception as err:
-            logger.warning("拉取 %s 日K失败,跳过:%s", code, err)
+    # 3) 净利润断层候选
+    try:
+        yjyg = fetcher.yjyg(quarter_end).head(top_codes_limit)
+        start, end = _daily_window(date)
+        daily_map = {}
+        seen_codes: set = set()
+        for _, r in yjyg.iterrows():
+            code = r.get("股票代码")
+            if not code:
+                continue
+            code = str(code)
+            if code in seen_codes:
+                continue  # 多行结构中同一股票只拉一次日K
+            seen_codes.add(code)
+            try:
+                daily_map[code] = fetcher.stock_daily(code, start, end)
+                time.sleep(0.3)  # 礼貌延迟,避免东财限流
+            except Exception as err:
+                logger.warning("拉取 %s 日K失败,跳过:%s", code, err)
+    except Exception as err:
+        logger.warning("获取业绩预告失败,断层候选降级为空:%s", err)
+        yjyg = pd.DataFrame(columns=["股票代码", "股票简称", "预测指标", "业绩变动幅度"])
+        daily_map = {}
     candidates = scan_profit_fault(yjyg, daily_map, growth_threshold=pf_cfg["growth_threshold"])
 
     return DailyBoard(
