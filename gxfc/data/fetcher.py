@@ -14,6 +14,44 @@ from gxfc.data.cache import DataFrameCache
 
 logger = logging.getLogger(__name__)
 
+# 新浪日K(英文列)→ 东财 stock_zh_a_hist(中文列)映射,
+# 使日K回退源对下游(profit_fault.detect_gap 依赖 日期/开盘/最高)透明。
+_SINA_DAILY_RENAME = {
+    "date": "日期",
+    "open": "开盘",
+    "high": "最高",
+    "low": "最低",
+    "close": "收盘",
+    "volume": "成交量",
+    "amount": "成交额",
+    "turnover": "换手率",
+}
+
+
+def _sina_symbol(code: str) -> str:
+    """6位纯数字代码 → 新浪带市场前缀格式(sh/sz/bj)。
+
+    沪市 6/9 开头(含 688 科创),深市 0/2/3 开头(含 300/301 创业板),
+    北交所 4/8 开头或 92 开头(如 920xxx)。
+    """
+    code = str(code).strip().zfill(6)
+    # 北交所优先判断:920xxx 以 9 开头,会与沪市 9(B股)规则冲突,须先拦截
+    if code.startswith("92") or code[0] in ("4", "8"):
+        return "bj" + code
+    if code[0] in ("0", "2", "3"):
+        return "sz" + code
+    if code[0] in ("6", "9"):
+        return "sh" + code
+    return "sh" + code  # 兜底,极少触达
+
+
+def _sina_daily_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """把新浪日K归一化为东财列结构,日期统一为 'YYYY-MM-DD' 字符串(与东财一致)。"""
+    out = df.rename(columns=_SINA_DAILY_RENAME)
+    if "日期" in out.columns:
+        out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
+    return out
+
 
 class Fetcher:
     def __init__(
@@ -119,11 +157,28 @@ class Fetcher:
         return self.fetch(f"yjyg:{date}", lambda: ak.stock_yjyg_em(date=date))
 
     def stock_daily(self, code: str, start: str, end: str) -> pd.DataFrame:
-        """个股前复权日K。含 日期,开盘,最高。start/end 形如 '20260101'。"""
+        """个股前复权日K。含 日期,开盘,最高。start/end 形如 '20260101'。
+
+        主源东财 stock_zh_a_hist;东财限流/断连(RemoteDisconnected)时自动回退
+        新浪 stock_zh_a_daily,并把新浪结果归一化为东财列结构,对下游透明。
+        两源同用一个缓存键:任一源成功即写入缓存,下次直接命中不再触网。
+        """
         import akshare as ak
-        return self.fetch(
-            f"daily:{code}:{start}:{end}",
-            lambda: ak.stock_zh_a_hist(
-                symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
-            ),
-        )
+        key = f"daily:{code}:{start}:{end}"
+        try:
+            return self.fetch(
+                key,
+                lambda: ak.stock_zh_a_hist(
+                    symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
+                ),
+            )
+        except Exception as em_err:
+            logger.warning("东财日K %s 失败,回退新浪源:%s", code, em_err)
+            return self.fetch(
+                key,
+                lambda: _sina_daily_to_em_schema(
+                    ak.stock_zh_a_daily(
+                        symbol=_sina_symbol(code), start_date=start, end_date=end, adjust="qfq"
+                    )
+                ),
+            )

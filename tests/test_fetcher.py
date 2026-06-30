@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 from gxfc.data.cache import DataFrameCache
-from gxfc.data.fetcher import Fetcher
+from gxfc.data.fetcher import Fetcher, _sina_symbol, _sina_daily_to_em_schema
 
 
 def test_loader成功时返回数据并写入缓存(tmp_path):
@@ -47,3 +47,52 @@ def test_重试中途成功则返回(tmp_path):
     got = fetcher.fetch("k3", loader)
     assert calls["n"] == 2
     assert list(got["ok"]) == [1]
+
+
+def test_新浪代码市场前缀映射():
+    assert _sina_symbol("000001") == "sz000001"   # 深主板
+    assert _sina_symbol("301531") == "sz301531"   # 创业板
+    assert _sina_symbol("603435") == "sh603435"   # 沪主板
+    assert _sina_symbol("688981") == "sh688981"   # 科创板
+    assert _sina_symbol("920136") == "bj920136"   # 北交所
+    assert _sina_symbol("1237") == "sz001237"     # 不足6位自动补零
+
+
+def test_新浪日K归一化为东财列结构():
+    sina = pd.DataFrame({
+        "date": ["2026-06-26", "2026-06-29"],
+        "open": [62.0, 64.0], "high": [63.0, 65.0], "low": [58.0, 64.0],
+        "close": [59.0, 65.0], "volume": [1, 2], "amount": [3, 4], "turnover": [0.1, 0.2],
+    })
+    em = _sina_daily_to_em_schema(sina)
+    assert {"日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额", "换手率"} <= set(em.columns)
+    assert list(em["日期"]) == ["2026-06-26", "2026-06-29"]
+
+
+def test_东财日K失败时回退新浪并归一化(tmp_path, monkeypatch):
+    import akshare as ak
+    cache = DataFrameCache(str(tmp_path / "d.db"))
+    fetcher = Fetcher(cache=cache, retries=1, min_interval=0)
+
+    def 东财失败(**kwargs):
+        raise RuntimeError("Connection aborted RemoteDisconnected")
+
+    def 新浪成功(symbol, **kwargs):
+        assert symbol == "sz001237"  # 6位代码应转成带前缀
+        return pd.DataFrame({
+            "date": ["2026-06-26", "2026-06-29"],
+            "open": [62.0, 64.0], "high": [63.0, 65.0], "low": [58.0, 64.0],
+            "close": [59.0, 65.0], "volume": [1, 2], "amount": [3, 4], "turnover": [0.1, 0.2],
+        })
+
+    monkeypatch.setattr(ak, "stock_zh_a_hist", 东财失败)
+    monkeypatch.setattr(ak, "stock_zh_a_daily", 新浪成功)
+
+    df = fetcher.stock_daily("001237", "20260620", "20260630")
+    # 回退结果对下游透明:含东财中文列,可直接喂给 detect_gap
+    assert "日期" in df.columns and "开盘" in df.columns and "最高" in df.columns
+    assert list(df["日期"]) == ["2026-06-26", "2026-06-29"]
+    # 成功结果应已写入缓存:再次调用直接命中,不再触发任何源
+    monkeypatch.setattr(ak, "stock_zh_a_daily", lambda **k: pytest.fail("不应再触网"))
+    again = fetcher.stock_daily("001237", "20260620", "20260630")
+    assert list(again["日期"]) == ["2026-06-26", "2026-06-29"]
