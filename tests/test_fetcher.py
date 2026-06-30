@@ -214,6 +214,22 @@ def test_东财成分股失败时回退新浪并按名反查label(tmp_path, monk
     assert df.iloc[0]["名称"] == "旗滨集团"
 
 
+def test_全市场快照归一化代码去前缀(monkeypatch):
+    import akshare as ak
+    fetcher = Fetcher(cache=None, retries=1, min_interval=0)
+    monkeypatch.setattr(ak, "stock_zh_a_spot", lambda: pd.DataFrame({
+        "代码": ["bj920000", "sh600000", "sz000001"],
+        "名称": ["甲", "乙", "丙"],
+        "涨跌幅": [8.0, -1.0, 2.0],
+        "最新价": [11.0, 10.0, 5.0],
+        "成交额": [1e8, 2e8, 3e7],
+        "今开": [10.0, 10.1, 4.9],   # 多余列应被丢弃
+    }))
+    df = fetcher.market_spot()
+    assert list(df["代码"]) == ["920000", "600000", "000001"]   # 前缀去掉
+    assert list(df.columns) == ["代码", "名称", "涨跌幅", "最新价", "成交额"]
+
+
 def test_东财连接被掐后熔断_后续跳过东财(monkeypatch):
     import akshare as ak
     fetcher = Fetcher(cache=None, retries=3, min_interval=0)

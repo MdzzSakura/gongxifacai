@@ -34,9 +34,9 @@ def test_渲染包含关键信息():
     assert "主线板块核心股" in text
 
 
-def test_保存三个csv文件(tmp_path):
+def test_保存csv文件(tmp_path):
     paths = save_csv(_board(), str(tmp_path))
-    assert len(paths) == 3
+    assert len(paths) == 4   # sectors / candidates / sector_cores / surge
     for p in paths:
         assert p.endswith(".csv")
         content = open(p, encoding="utf-8-sig").read()

@@ -58,31 +58,44 @@ def _baostock_daily_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_baostock_logged_in = False
+
+
+def _ensure_baostock_login() -> None:
+    """进程内只登录一次 Baostock。批量拉日K时避免每次 login/logout 的网络开销。
+
+    登录/登出会打印到 stdout,这里重定向吞掉以保持控制台干净。
+    """
+    global _baostock_logged_in
+    if _baostock_logged_in:
+        return
+    import baostock as bs
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs.login()
+    _baostock_logged_in = True
+
+
 def _baostock_daily(code: str, start: str, end: str) -> pd.DataFrame:
     """Baostock 前复权日K,归一化为东财列结构。
 
     code 为6位纯数字;start/end 形如 '20260101'。空结果/查询错误抛异常,
-    由 _fetch_first_ok 转下一个源。Baostock 的 login/logout 会打印到 stdout,
-    这里重定向吞掉以保持控制台干净。
+    由 _fetch_first_ok 转下一个源。进程内复用单次登录(见 _ensure_baostock_login)。
     """
     import baostock as bs
     sym = _baostock_symbol(code)
     s = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
     e = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+    _ensure_baostock_login()
     with contextlib.redirect_stdout(io.StringIO()):
-        bs.login()
-        try:
-            rs = bs.query_history_k_data_plus(
-                sym, "date,open,high,low,close,volume,amount",
-                start_date=s, end_date=e, frequency="d", adjustflag="2",  # 2=前复权
-            )
-            if rs.error_code != "0":
-                raise RuntimeError(f"baostock 查询失败:{rs.error_msg}")
-            rows = []
-            while rs.next():
-                rows.append(rs.get_row_data())
-        finally:
-            bs.logout()
+        rs = bs.query_history_k_data_plus(
+            sym, "date,open,high,low,close,volume,amount",
+            start_date=s, end_date=e, frequency="d", adjustflag="2",  # 2=前复权
+        )
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock 查询失败:{rs.error_msg}")
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
     df = pd.DataFrame(rows, columns=rs.fields)
     if df.empty:
         raise RuntimeError(f"baostock 无数据:{sym}")
@@ -132,6 +145,17 @@ _SINA_DETAIL_RENAME = {"name": "名称", "changepercent": "涨跌幅", "amount":
 def _sina_sector_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
     """新浪行业榜归一化为东财板块榜列结构(板块名称/涨跌幅/领涨股票)。"""
     return df.rename(columns=_SINA_SECTOR_RENAME)
+
+
+_MARKET_SPOT_COLS = ["代码", "名称", "涨跌幅", "最新价", "成交量", "成交额"]
+
+
+def _normalize_market_spot(df: pd.DataFrame) -> pd.DataFrame:
+    """新浪全市场快照归一化:代码去市场前缀(bj/sh/sz)转6位,保留粗筛所需列。"""
+    out = df.copy()
+    out["代码"] = out["代码"].astype(str).str.replace(r"^[A-Za-z]+", "", regex=True)
+    cols = [c for c in _MARKET_SPOT_COLS if c in out.columns]
+    return out[cols]
 
 
 def _sina_detail_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -283,6 +307,15 @@ class Fetcher:
             [("东财", ak.stock_zh_a_spot_em, True), ("新浪", ak.stock_zh_a_spot)],
             use_cache=False,
         )
+
+    def market_spot(self) -> pd.DataFrame:
+        """新浪全市场实时快照(~5500 只,含北交所),用于全市场粗筛。
+
+        归一化为 代码(去前缀6位)/名称/涨跌幅/最新价/成交额。只走新浪(列稳定、
+        含北交所、批量接口抗限流);不走缓存,保证当日数据。
+        """
+        import akshare as ak
+        return _normalize_market_spot(self.fetch("market_spot", ak.stock_zh_a_spot, use_cache=False))
 
     def industry_board(self) -> pd.DataFrame:
         """东财行业板块实时行情。列含:板块名称,涨跌幅,领涨股票 等。

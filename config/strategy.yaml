@@ -16,3 +16,13 @@ sector:
 # 净利润断层
 profit_fault:
   growth_threshold: 50.0    # 预告/快报净利润同比增速≥此值(proxy超预期,单位%)
+
+# 全市场底部爆量大涨(地量地价后突放巨量+大涨的启动信号)
+bottom_volume:
+  rise_threshold: 7.0           # 大涨:今日涨幅≥此值(%)
+  volume_ratio_threshold: 2.0   # 爆量:量比(今量/前N日均量)≥此值
+  bottom_ratio: 0.6             # 底部:今收≤最近window日最高×此系数
+  bottom_window: 60             # 底部窗口(交易日)
+  volume_baseline: 5            # 量比基准(前N日均量)
+  max_survivors: 60             # 粗筛后按涨幅取前N只精算(上限,控制耗时)
+  top_n: 50                     # 面板展示条数

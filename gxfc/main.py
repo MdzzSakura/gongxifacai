@@ -15,9 +15,12 @@ import yaml
 
 from gxfc.data.cache import DataFrameCache
 from gxfc.data.fetcher import Fetcher
+from gxfc.factors.bottom_volume import scan_bottom_volume
 from gxfc.factors.market_emotion import MarketEmotion, compute_market_emotion
-from gxfc.factors.profit_fault import scan_profit_fault
+from gxfc.factors.profit_fault import scan_profit_fault, passes_growth
 from gxfc.factors.sector import rank_sectors, core_stocks
+
+_NET_PROFIT = "归属于上市公司股东的净利润"
 from gxfc.review.daily_board import DailyBoard, render_console, save_csv
 
 logger = logging.getLogger(__name__)
@@ -84,8 +87,18 @@ def build_board(fetcher, date: str, quarter_end: str, config: dict,
         sectors = pd.DataFrame(columns=["板块名称", "涨跌幅", "领涨股票"])
 
     # 3) 净利润断层候选
+    high_growth_codes: set = set()
     try:
-        yjyg = fetcher.yjyg(quarter_end).head(top_codes_limit)
+        yjyg_full = fetcher.yjyg(quarter_end)
+        # 业绩高增集合(全量,供底部爆量段叠加标记):净利润行且增速达标
+        for _, r in yjyg_full.iterrows():
+            if r.get("预测指标") != _NET_PROFIT:
+                continue
+            if passes_growth(r.get("业绩变动幅度"), pf_cfg["growth_threshold"]):
+                code = str(r.get("股票代码", "")).strip()
+                if code:
+                    high_growth_codes.add(code)
+        yjyg = yjyg_full.head(top_codes_limit)
         start, end = _daily_window(date)
         daily_map = {}
         seen_codes: set = set()
@@ -108,10 +121,66 @@ def build_board(fetcher, date: str, quarter_end: str, config: dict,
         daily_map = {}
     candidates = scan_profit_fault(yjyg, daily_map, growth_threshold=pf_cfg["growth_threshold"])
 
+    # 4) 全市场底部爆量大涨(混合架构:新浪全市场粗筛 → 幸存者 Baostock 60日K 精算)
+    surge = _scan_market_bottom_volume(fetcher, date, config, high_growth_codes)
+
     return DailyBoard(
         date=date, emotion=emotion, sectors=sectors,
         candidates=candidates, sector_cores=sector_cores,
+        surge_candidates=surge,
     )
+
+
+def _scan_market_bottom_volume(fetcher, date: str, config: dict, high_growth_codes: set) -> pd.DataFrame:
+    """全市场底部爆量大涨扫描,整段独立容错,失败返回空表。
+
+    第1步用一次新浪全市场快照按涨幅粗筛,第2步只对幸存者逐只拉 60 日日K
+    (走 Baostock 主源,复用缓存),交由 scan_bottom_volume 现算三条件。
+    """
+    bv_cfg = config["bottom_volume"]
+    try:
+        spot_all = fetcher.market_spot()
+        pct = pd.to_numeric(spot_all["涨跌幅"], errors="coerce")
+        survivors = spot_all.assign(_pct=pct)
+        survivors = survivors[survivors["_pct"] >= bv_cfg["rise_threshold"]]
+        # Baostock 仅覆盖沪深(主板/创业板/科创板);剔除北交所/B股等无免费历史源的代码
+        codes = survivors["代码"].astype(str)
+        keep = codes.str.startswith(("0", "3", "6"))
+        dropped = int((~keep).sum())
+        survivors = survivors[keep]
+        if dropped:
+            logger.info("底部爆量:剔除 %d 只无 Baostock 历史源的代码(北交所/B股)", dropped)
+        hit = len(survivors)
+        # 按涨幅降序取上限,控制 Baostock 拉取耗时;超出部分明确记日志(非静默截断)
+        max_survivors = bv_cfg.get("max_survivors", 60)
+        survivors = survivors.sort_values("_pct", ascending=False).head(max_survivors).copy()
+        if hit > max_survivors:
+            logger.warning("底部爆量:涨幅≥%.1f%% 命中 %d 只,超上限按涨幅取前 %d 只精算",
+                           bv_cfg["rise_threshold"], hit, max_survivors)
+        else:
+            logger.info("底部爆量:粗筛涨幅≥%.1f%% 命中 %d 只,逐只拉日K中",
+                        bv_cfg["rise_threshold"], hit)
+        # 往前约 130 自然日,确保覆盖 ≥ bottom_window 个交易日
+        start = (datetime.strptime(date, "%Y%m%d") - timedelta(days=130)).strftime("%Y%m%d")
+        daily_map = {}
+        for code in survivors["代码"]:
+            code = str(code)
+            try:
+                daily_map[code] = fetcher.stock_daily(code, start, date)
+            except Exception as err:
+                logger.warning("拉取 %s 日K失败(底部爆量),跳过:%s", code, err)
+        result = scan_bottom_volume(
+            survivors, daily_map, high_growth_codes,
+            rise_threshold=bv_cfg["rise_threshold"],
+            volume_ratio_threshold=bv_cfg["volume_ratio_threshold"],
+            bottom_ratio=bv_cfg["bottom_ratio"],
+            bottom_window=bv_cfg["bottom_window"],
+            volume_baseline=bv_cfg["volume_baseline"],
+        )
+        return result.head(bv_cfg["top_n"])
+    except Exception as err:
+        logger.warning("全市场底部爆量扫描失败,该段降级为空:%s", err)
+        return pd.DataFrame()
 
 
 def run_daily(date: str, quarter_end: str, out_dir: str = "out") -> DailyBoard:

@@ -59,7 +59,24 @@ class FakeFetcher:
             }
         )
 
+    def market_spot(self):
+        # 全市场快照(今日值):300888 涨12%、收9、量5000(过粗筛+大涨),其余不过
+        return pd.DataFrame({
+            "代码": ["300888", "600111", "000002"],
+            "名称": ["爆量股", "平淡股", "乙"],
+            "涨跌幅": [12.0, 2.0, 1.0],
+            "最新价": [9.0, 10.0, 5.0],
+            "成交量": [5000, 1000, 800],
+            "成交额": [4e8, 1e8, 2e7],
+        })
+
     def stock_daily(self, code, start, end):
+        if code == "300888":
+            # 历史59根(今日之前):长期低位缩量,前5日均量1000,区间最高20
+            return pd.DataFrame({
+                "最高": [20.0] + [8.5] * 58,
+                "成交量": [1000] * 59,
+            })
         if code == "000001":
             return pd.DataFrame(
                 {"日期": ["2026-06-28", "2026-06-29"], "开盘": [10.0, 11.0],
@@ -91,6 +108,10 @@ def test_组装面板包含情绪板块与候选():
     assert board.sector_cores
     assert set(board.sector_cores).issubset(set(board.sectors["板块名称"]))
     assert "电力" in board.sector_cores
+    # 底部爆量大涨:300888 三条件全过应入选
+    assert list(board.surge_candidates["代码"]) == ["300888"]
+    assert board.surge_candidates.iloc[0]["今日涨跌幅"] == 12.0
+    assert board.surge_candidates.iloc[0]["量比"] == 5.0
 
 
 def test_月初窗口跨月回溯():

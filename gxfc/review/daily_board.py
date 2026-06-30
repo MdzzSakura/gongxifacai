@@ -19,6 +19,7 @@ class DailyBoard:
     sectors: pd.DataFrame
     candidates: pd.DataFrame
     sector_cores: dict = field(default_factory=dict)
+    surge_candidates: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def render_console(board: DailyBoard) -> str:
@@ -55,6 +56,13 @@ def render_console(board: DailyBoard) -> str:
         )
     else:
         lines.append("(当日无达标候选)")
+    lines.append("")
+    lines.append("【底部爆量大涨】(全市场:大涨+爆量+底部低位;业绩高增叠加标记)")
+    surge = board.surge_candidates
+    if surge is not None and len(surge) > 0:
+        lines.append(tabulate(surge, headers="keys", tablefmt="grid", showindex=False))
+    else:
+        lines.append("(当日无达标候选)")
     return "\n".join(lines)
 
 
@@ -63,8 +71,11 @@ def save_csv(board: DailyBoard, out_dir: str) -> list[str]:
     sector_path = os.path.join(out_dir, f"sectors_{board.date}.csv")
     cand_path = os.path.join(out_dir, f"candidates_{board.date}.csv")
     cores_path = os.path.join(out_dir, f"sector_cores_{board.date}.csv")
+    surge_path = os.path.join(out_dir, f"surge_candidates_{board.date}.csv")
     board.sectors.to_csv(sector_path, index=False, encoding="utf-8-sig")
     board.candidates.to_csv(cand_path, index=False, encoding="utf-8-sig")
+    surge = board.surge_candidates if board.surge_candidates is not None else pd.DataFrame()
+    surge.to_csv(surge_path, index=False, encoding="utf-8-sig")
 
     # 各板块成分股纵向拼接,增加"所属板块"列标明来源
     if board.sector_cores:
@@ -78,4 +89,4 @@ def save_csv(board: DailyBoard, out_dir: str) -> list[str]:
         cores_df = pd.DataFrame(columns=["所属板块"])
     cores_df.to_csv(cores_path, index=False, encoding="utf-8-sig")
 
-    return [sector_path, cand_path, cores_path]
+    return [sector_path, cand_path, cores_path, surge_path]
