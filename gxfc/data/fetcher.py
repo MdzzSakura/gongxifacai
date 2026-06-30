@@ -59,6 +59,22 @@ def _baostock_daily_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
 
 
 _baostock_logged_in = False
+_baostock_available: Optional[bool] = None
+
+
+def _baostock_ready() -> bool:
+    """进程内探测 baostock 是否可用(未安装则只提示一次,后续静默跳过)。"""
+    global _baostock_available
+    if _baostock_available is None:
+        try:
+            import baostock  # noqa: F401
+            _baostock_available = True
+        except Exception:
+            _baostock_available = False
+            logger.warning(
+                "未安装 baostock,个股日K回退新浪源;建议 pip install baostock 获得更稳的免费日K"
+            )
+    return _baostock_available
 
 
 def _ensure_baostock_login() -> None:
@@ -375,10 +391,10 @@ class Fetcher:
             # 北交所:免费源 Baostock/新浪 均不覆盖,仅东财可能有
             sources = [("东财", em_loader, True)]
         else:
-            sources = [
-                ("baostock", lambda: _baostock_daily(code, start, end)),
-                ("新浪", lambda: _sina_daily_to_em_schema(
-                    ak.stock_zh_a_daily(symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"))),
-                ("东财", em_loader, True),
-            ]
+            sources = []
+            if _baostock_ready():  # 未安装 baostock 则直接跳过该源,不逐股报错
+                sources.append(("baostock", lambda: _baostock_daily(code, start, end)))
+            sources.append(("新浪", lambda: _sina_daily_to_em_schema(
+                ak.stock_zh_a_daily(symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"))))
+            sources.append(("东财", em_loader, True))
         return self._fetch_first_ok(key, sources)
