@@ -16,11 +16,28 @@ logger = logging.getLogger(__name__)
 
 
 class Fetcher:
-    def __init__(self, cache: Optional[DataFrameCache] = None, retries: int = 3):
+    def __init__(
+        self,
+        cache: Optional[DataFrameCache] = None,
+        retries: int = 3,
+        min_interval: float = 0.8,
+    ):
         if retries < 1:
             raise ValueError("retries 必须 >= 1")
         self._cache = cache
         self._retries = retries
+        # 东财等数据源对突发请求敏感,强制任意两次真实请求之间至少间隔 min_interval 秒
+        self._min_interval = min_interval
+        self._last_call = 0.0
+
+    def _throttle(self) -> None:
+        """请求节流:距上次真实请求不足 min_interval 则补足等待,摊平突发流量。"""
+        if self._min_interval <= 0:
+            return
+        elapsed = time.monotonic() - self._last_call
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
+        self._last_call = time.monotonic()
 
     def fetch(
         self, key: str, loader: Callable[[], pd.DataFrame], use_cache: bool = True
@@ -32,6 +49,7 @@ class Fetcher:
         last_err = None
         for attempt in range(1, self._retries + 1):
             try:
+                self._throttle()
                 df = loader()
                 if use_cache and self._cache is not None:
                     self._cache.set(key, df)
@@ -40,7 +58,8 @@ class Fetcher:
                 last_err = err
                 logger.warning("抓取 %s 第 %d 次失败:%s", key, attempt, err)
                 if attempt < self._retries:
-                    time.sleep(0.5 * attempt)
+                    # 指数退避(1/2/4...秒,封顶8秒),给限流恢复留时间
+                    time.sleep(min(8.0, 2.0 ** (attempt - 1)))
         raise last_err
 
     # —— 以下为具体业务接口,封装对应 AKShare 调用 ——
