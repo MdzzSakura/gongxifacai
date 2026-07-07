@@ -5,3 +5,6 @@ __pycache__/
 out/
 .venv/
 venv/
+xingqiudocs/
+*.duckdb
+.idea/

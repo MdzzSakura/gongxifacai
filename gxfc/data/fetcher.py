@@ -1,22 +1,25 @@
-"""数据抓取封装(多源)。
+"""数据抓取封装(多源)。项目内唯一联网入口,接口/源变动只改这里。
 
-对外数据调用集中在本文件,接口/源变动只改这里。通用 fetch 提供"缓存命中优先 +
-失败重试"语义;_fetch_first_ok 按优先级在多个数据源间自动回退。业务方法用到的
-列名见各方法 docstring。各源结果统一归一化为东财列结构,对下游透明。
+通用 fetch 提供"失败重试(指数退避)"语义;_fetch_first_ok 按优先级在多个数据源
+间自动回退。各源结果统一归一化为东财列结构,对下游透明;唯一例外是成交量单位:
+东财原始为"手",本层统一换算为"股"(baostock/新浪原生即股),保证 daily 序列
+跨源一致。
 
-源稳定性:个股日K 优先 Baostock(自有服务器,不爬东财→不受东财风控),失败再
-回退新浪、东财;板块/实时快照 主东财、回退新浪;涨跌停池为东财独有(push2ex),
-免费渠道无替代,断连时由调用方降级或吃缓存。
+源档案(_SOURCE_PROFILE)集中管理每个源的节流间隔与是否东财:东财对突发请求
+敏感,间隔最长且带随机抖动(等间隔请求最易被识别为爬虫);baostock 自有服务器
+可放开到 0.1s。熔断分两层:东财连接被掐(RemoteDisconnected)立即熔断本轮;
+非东财源连续失败 3 次也临时熔断本轮,避免对已挂的源空转重试。
+
+数据落地由 gxfc.ingest 负责(写 DuckDB),本层不做缓存。
 """
 import contextlib
 import io
 import logging
+import random
 import time
 from typing import Callable, List, Optional, Tuple
 
 import pandas as pd
-
-from gxfc.data.cache import DataFrameCache
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,17 @@ _BAOSTOCK_RENAME = {
     "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
     "close": "收盘", "volume": "成交量", "amount": "成交额",
 }
+
+# 每个源的请求节流间隔(秒)与是否东财系。东财间隔取 None 表示用实例默认
+# (构造参数 min_interval,盘后批量采集可调大)。
+_SOURCE_PROFILE = {
+    "baostock": {"interval": 0.1, "em": False},
+    "新浪": {"interval": 0.5, "em": False},
+    "东财": {"interval": None, "em": True},
+}
+
+# 非东财源连续失败达到该次数,本轮运行内熔断该源(东财有专门的连接级熔断)
+_SOURCE_FAIL_LIMIT = 3
 
 
 def _baostock_symbol(code: str) -> str:
@@ -118,6 +132,35 @@ def _baostock_daily(code: str, start: str, end: str) -> pd.DataFrame:
     return _baostock_daily_to_em_schema(df)
 
 
+def _baostock_trade_dates(start: str, end: str) -> pd.DataFrame:
+    """Baostock 交易日历,返回单列 calendar_date('YYYY-MM-DD',仅交易日)。"""
+    import baostock as bs
+    _ensure_baostock_login()
+    with contextlib.redirect_stdout(io.StringIO()):
+        rs = bs.query_trade_dates(start_date=start, end_date=end)
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock 交易日历查询失败:{rs.error_msg}")
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+    df = pd.DataFrame(rows, columns=rs.fields)
+    if df.empty:
+        raise RuntimeError("baostock 交易日历为空")
+    trading = df[df["is_trading_day"] == "1"]
+    return pd.DataFrame({"calendar_date": trading["calendar_date"].tolist()})
+
+
+def _sina_trade_dates(start: str, end: str) -> pd.DataFrame:
+    """新浪交易日历(tool_trade_date_hist_sina 覆盖历史与未来),过滤到区间。"""
+    import akshare as ak
+    df = ak.tool_trade_date_hist_sina()
+    dates = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
+    keep = dates[(dates >= start) & (dates <= end)]
+    if keep.empty:
+        raise RuntimeError(f"新浪交易日历区间无数据:{start}~{end}")
+    return pd.DataFrame({"calendar_date": keep.tolist()})
+
+
 def _is_conn_error(err: Exception) -> bool:
     """判断是否为连接被拒类错误(东财风控掐连的典型表现),用于触发熔断。"""
     if isinstance(err, ConnectionError):
@@ -151,6 +194,14 @@ def _sina_daily_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _em_daily_to_std_volume(df: pd.DataFrame) -> pd.DataFrame:
+    """东财日K成交量 手→股(×100),与 baostock/新浪(原生股)统一。"""
+    out = df.copy()
+    if "成交量" in out.columns:
+        out["成交量"] = pd.to_numeric(out["成交量"], errors="coerce") * 100
+    return out
+
+
 # 新浪行业榜(stock_sector_spot)→ 东财 industry_board 列;新浪行业成分股
 # (stock_sector_detail,英文列)→ 东财 industry_cons 列,使板块段回退对下游
 # (sector.rank_sectors / core_stocks)透明。
@@ -172,6 +223,34 @@ def _normalize_market_spot(df: pd.DataFrame) -> pd.DataFrame:
     out["代码"] = out["代码"].astype(str).str.replace(r"^[A-Za-z]+", "", regex=True)
     cols = [c for c in _MARKET_SPOT_COLS if c in out.columns]
     return out[cols]
+
+
+# 全市场日K快照(采集"快照一次成型"用):统一输出列。收盘即最新价;昨收用于
+# 除权检测(除权日交易所口径的昨收=除权参考价,与库内前收比对即可发现除权)。
+_DAILY_SNAPSHOT_COLS = ["代码", "名称", "今开", "最高", "最低", "收盘", "昨收",
+                        "成交量", "成交额", "换手率"]
+
+
+def _em_spot_to_daily_snapshot(df: pd.DataFrame) -> pd.DataFrame:
+    """东财全市场快照 → 日K快照标准列。成交量 手→股。"""
+    out = df.rename(columns={"最新价": "收盘"}).copy()
+    out["成交量"] = pd.to_numeric(out["成交量"], errors="coerce") * 100
+    missing = [c for c in _DAILY_SNAPSHOT_COLS if c not in out.columns]
+    if missing:
+        raise ValueError(f"东财快照缺列:{missing}")
+    return out[_DAILY_SNAPSHOT_COLS]
+
+
+def _sina_spot_to_daily_snapshot(df: pd.DataFrame) -> pd.DataFrame:
+    """新浪全市场快照 → 日K快照标准列。代码去前缀;无换手率列置 NULL。"""
+    out = df.rename(columns={"最新价": "收盘"}).copy()
+    out["代码"] = out["代码"].astype(str).str.replace(r"^[A-Za-z]+", "", regex=True)
+    if "换手率" not in out.columns:
+        out["换手率"] = None
+    missing = [c for c in _DAILY_SNAPSHOT_COLS if c not in out.columns]
+    if missing:
+        raise ValueError(f"新浪快照缺列:{missing}")
+    return out[_DAILY_SNAPSHOT_COLS]
 
 
 def _sina_detail_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -196,15 +275,9 @@ def _sina_industry_cons(board: str) -> pd.DataFrame:
 
 
 class Fetcher:
-    def __init__(
-        self,
-        cache: Optional[DataFrameCache] = None,
-        retries: int = 3,
-        min_interval: float = 0.8,
-    ):
+    def __init__(self, retries: int = 3, min_interval: float = 0.8):
         if retries < 1:
             raise ValueError("retries 必须 >= 1")
-        self._cache = cache
         self._retries = retries
         # 东财等数据源对突发请求敏感,强制任意两次真实请求之间至少间隔 min_interval 秒
         self._min_interval = min_interval
@@ -212,38 +285,56 @@ class Fetcher:
         # 熔断标志:一旦探测到东财行情连接被风控掐断,本次运行后续有兜底的接口
         # 直接走新浪,不再对已知挂掉的东财反复重试,避免拖慢与刷屏。
         self._eastmoney_down = False
+        # 每源健康度:{源名: {"ok": 成功数, "fail": 失败数, "consec": 连续失败数}}
+        # 非东财源 consec 达 _SOURCE_FAIL_LIMIT 即本轮熔断;采集摘要用于观测。
+        self.health: dict = {}
+        # 最近一次 _fetch_first_ok 成功命中的源名,供采集台账记录实际来源
+        self.last_source: str = ""
 
-    def _throttle(self) -> None:
-        """请求节流:距上次真实请求不足 min_interval 则补足等待,摊平突发流量。"""
-        if self._min_interval <= 0:
+    def _throttle(self, interval: Optional[float] = None) -> None:
+        """请求节流:距上次真实请求不足间隔则补足等待,并加 ±30% 随机抖动摊平指纹。"""
+        base = self._min_interval if interval is None else interval
+        if base <= 0:
             return
+        target = base * random.uniform(0.7, 1.3)
         elapsed = time.monotonic() - self._last_call
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
+        if elapsed < target:
+            time.sleep(target - elapsed)
         self._last_call = time.monotonic()
+
+    def _health(self, name: str) -> dict:
+        return self.health.setdefault(name, {"ok": 0, "fail": 0, "consec": 0})
+
+    def _mark(self, name: str, ok: bool) -> None:
+        h = self._health(name)
+        if ok:
+            h["ok"] += 1
+            h["consec"] = 0
+        else:
+            h["fail"] += 1
+            h["consec"] += 1
+
+    def _source_down(self, name: str, is_em: bool) -> bool:
+        """该源本轮是否已熔断:东财看连接级熔断标志,其余看连续失败次数。"""
+        if is_em and self._eastmoney_down:
+            return True
+        return self._health(name)["consec"] >= _SOURCE_FAIL_LIMIT
 
     def fetch(
         self,
         key: str,
         loader: Callable[[], pd.DataFrame],
-        use_cache: bool = True,
         retries: Optional[int] = None,
+        interval: Optional[float] = None,
     ) -> pd.DataFrame:
-        """缓存命中优先 + 失败重试。retries 不传则用实例默认;有兜底源的调用
+        """失败重试(指数退避)。retries 不传则用实例默认;有兜底源的调用
         可传 retries=1 让主源快速失败,把重试预算留给真正可用的回退源。"""
-        if use_cache and self._cache is not None:
-            cached = self._cache.get(key)
-            if cached is not None:
-                return cached
         attempts = retries if retries is not None else self._retries
         last_err = None
         for attempt in range(1, attempts + 1):
             try:
-                self._throttle()
-                df = loader()
-                if use_cache and self._cache is not None:
-                    self._cache.set(key, df)
-                return df
+                self._throttle(interval)
+                return loader()
             except Exception as err:  # AKShare 抛出的异常类型不固定,统一兜底
                 last_err = err
                 logger.warning("抓取 %s 第 %d 次失败:%s", key, attempt, err)
@@ -252,39 +343,41 @@ class Fetcher:
                     time.sleep(min(8.0, 2.0 ** (attempt - 1)))
         raise last_err
 
-    def _fetch_first_ok(
-        self,
-        key: str,
-        sources: List[Tuple],
-        use_cache: bool = True,
-    ) -> pd.DataFrame:
-        """按优先级依次尝试多个数据源,首个成功即缓存返回。
+    def _fetch_first_ok(self, key: str, sources: List[Tuple[str, Callable]]) -> pd.DataFrame:
+        """按优先级依次尝试多个数据源,首个成功即返回。
 
-        sources 为有序列表,每项 (名称, loader) 或 (名称, loader, is_eastmoney)。
+        sources 为有序列表,每项 (源名, loader);源名须在 _SOURCE_PROFILE 注册,
+        据此取节流间隔与东财标记。
         东财源:熔断后跳过;只试 1 次(易风控,有后续兜底则不值得多试);失败且为
         连接被拒(RemoteDisconnected 等)时触发熔断,本次运行后续跳过所有东财源。
-        非东财源:作为最后兜底时用默认 retries(值得多试),否则只试 1 次。
-        全部失败抛最后一个异常,由调用方降级跳过。
+        非东财源:连续失败 3 次本轮熔断;作为最后兜底时用默认 retries(值得多试),
+        否则只试 1 次。全部失败抛最后一个异常,由调用方降级跳过。
         """
         last_err: Optional[Exception] = None
         n = len(sources)
-        for i, src in enumerate(sources):
-            name, loader = src[0], src[1]
-            is_em = src[2] if len(src) > 2 else False
-            if is_em and self._eastmoney_down:
+        for i, (name, loader) in enumerate(sources):
+            profile = _SOURCE_PROFILE[name]
+            is_em = profile["em"]
+            if self._source_down(name, is_em):
                 continue
             is_last = i == n - 1
             retries = None if (is_last and not is_em) else 1
             try:
-                return self.fetch(key, loader, use_cache=use_cache, retries=retries)
+                df = self.fetch(key, loader, retries=retries, interval=profile["interval"])
+                self._mark(name, ok=True)
+                self.last_source = name
+                return df
             except Exception as err:
                 last_err = err
+                self._mark(name, ok=False)
                 if is_em and _is_conn_error(err):
                     self._eastmoney_down = True
                     logger.warning("东财行情连接被风控掐断,本次运行后续跳过东财源")
+                elif not is_em and self._health(name)["consec"] == _SOURCE_FAIL_LIMIT:
+                    logger.warning("%s 源连续失败 %d 次,本轮熔断", name, _SOURCE_FAIL_LIMIT)
                 logger.warning("%s 源 %s 失败:%s", name, key, err)
         if last_err is None:
-            raise RuntimeError(f"{key}:无可用数据源")
+            raise RuntimeError(f"{key}:无可用数据源(全部已熔断)")
         raise last_err
 
     # —— 以下为具体业务接口,封装对应 AKShare 调用 ——
@@ -311,27 +404,49 @@ class Fetcher:
         return self.fetch(f"zb_pool:{date}", lambda: ak.stock_zt_pool_zbgc_em(date=date))
 
     def spot(self) -> pd.DataFrame:
-        """全市场 A 股实时快照(东财)。含 涨跌幅 列。
-        注意:东财对该接口限流较敏感,失败由通用 fetch 重试,
-        最终失败由调用方降级(将 spot_df 置 None 传入 compute_market_emotion)。
-        不走缓存,保证数据实时。
-        """
+        """全市场 A 股实时快照(东财主、新浪兜底),原始列结构。含 涨跌幅 列。"""
         import akshare as ak
-        # 新浪 stock_zh_a_spot 自带 '涨跌幅'(float),compute_market_emotion 可直接消费
         return self._fetch_first_ok(
             "spot",
-            [("东财", ak.stock_zh_a_spot_em, True), ("新浪", ak.stock_zh_a_spot)],
-            use_cache=False,
+            [("东财", ak.stock_zh_a_spot_em), ("新浪", ak.stock_zh_a_spot)],
         )
+
+    def daily_snapshot(self) -> pd.DataFrame:
+        """全市场日K快照:收盘后一次请求拿到全部股票的当日 OHLCV。
+
+        统一列:代码(6位)/名称/今开/最高/最低/收盘/昨收/成交量(股)/成交额/换手率。
+        东财主源(含换手率)、新浪兜底(换手率为 NULL)。昨收供除权检测。
+        采集"快照一次成型"的数据基础:每日增量 1 次请求替代 ~5000 次逐股拉取。
+        """
+        import akshare as ak
+        return self._fetch_first_ok(
+            "daily_snapshot",
+            [
+                ("东财", lambda: _em_spot_to_daily_snapshot(ak.stock_zh_a_spot_em())),
+                ("新浪", lambda: _sina_spot_to_daily_snapshot(ak.stock_zh_a_spot())),
+            ],
+        )
+
+    def trade_dates(self, start: str, end: str) -> List[str]:
+        """[start, end] 区间交易日('YYYY-MM-DD' 升序)。Baostock 主、新浪兜底。
+
+        start/end 形如 '2026-01-01'(两源均支持未来日期,可拉全年日历)。
+        """
+        sources: List[Tuple[str, Callable]] = []
+        if _baostock_ready():
+            sources.append(("baostock", lambda: _baostock_trade_dates(start, end)))
+        sources.append(("新浪", lambda: _sina_trade_dates(start, end)))
+        df = self._fetch_first_ok(f"trade_dates:{start}:{end}", sources)
+        return sorted(df["calendar_date"].astype(str).tolist())
 
     def market_spot(self) -> pd.DataFrame:
         """新浪全市场实时快照(~5500 只,含北交所),用于全市场粗筛。
 
         归一化为 代码(去前缀6位)/名称/涨跌幅/最新价/成交额。只走新浪(列稳定、
-        含北交所、批量接口抗限流);不走缓存,保证当日数据。
+        含北交所、批量接口抗限流)。
         """
         import akshare as ak
-        return _normalize_market_spot(self.fetch("market_spot", ak.stock_zh_a_spot, use_cache=False))
+        return _normalize_market_spot(self.fetch("market_spot", ak.stock_zh_a_spot))
 
     def industry_board(self) -> pd.DataFrame:
         """东财行业板块实时行情。列含:板块名称,涨跌幅,领涨股票 等。
@@ -343,23 +458,21 @@ class Fetcher:
         return self._fetch_first_ok(
             "industry_board",
             [
-                ("东财", ak.stock_board_industry_name_em, True),
+                ("东财", ak.stock_board_industry_name_em),
                 ("新浪", lambda: _sina_sector_to_em_schema(ak.stock_sector_spot(indicator="新浪行业"))),
             ],
-            use_cache=False,
         )
 
     def industry_cons(self, board: str) -> pd.DataFrame:
         """行业板块成分股。含 名称,涨跌幅,成交额。
 
         东财失败时回退新浪:按板块名反查 label 再下钻(见 _sina_industry_cons)。
-        两源共用缓存键,任一成功即缓存。
         """
         import akshare as ak
         return self._fetch_first_ok(
             f"industry_cons:{board}",
             [
-                ("东财", lambda: ak.stock_board_industry_cons_em(symbol=board), True),
+                ("东财", lambda: ak.stock_board_industry_cons_em(symbol=board)),
                 ("新浪", lambda: _sina_industry_cons(board)),
             ],
         )
@@ -378,23 +491,23 @@ class Fetcher:
         """个股前复权日K。含 日期,开盘,最高。start/end 形如 '20260101'。
 
         数据源优先级:Baostock(自有服务器最稳,仅沪深)→ 新浪 → 东财。北交所
-        (920/8xx/4xx)Baostock/新浪均不支持,仅能尝试东财。各源结果归一化为东财
-        列结构,共用一个缓存键:任一源成功即写入,下次直接命中不再触网。
+        (920/8xx/4xx)Baostock/新浪均不支持,仅能尝试东财。各源结果归一化为
+        东财列结构,成交量统一为"股"(东财原始为手,已换算)。
         """
         import akshare as ak
         key = f"daily:{code}:{start}:{end}"
         sina_sym = _sina_symbol(code)
-        em_loader = lambda: ak.stock_zh_a_hist(
+        em_loader = lambda: _em_daily_to_std_volume(ak.stock_zh_a_hist(
             symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
-        )
+        ))
         if sina_sym.startswith("bj"):
             # 北交所:免费源 Baostock/新浪 均不覆盖,仅东财可能有
-            sources = [("东财", em_loader, True)]
+            sources = [("东财", em_loader)]
         else:
             sources = []
             if _baostock_ready():  # 未安装 baostock 则直接跳过该源,不逐股报错
                 sources.append(("baostock", lambda: _baostock_daily(code, start, end)))
             sources.append(("新浪", lambda: _sina_daily_to_em_schema(
                 ak.stock_zh_a_daily(symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"))))
-            sources.append(("东财", em_loader, True))
+            sources.append(("东财", em_loader))
         return self._fetch_first_ok(key, sources)

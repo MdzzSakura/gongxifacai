@@ -1,0 +1,127 @@
+"""离线筛选测试:预置 DuckDB 数据组装面板,全程零网络(screen 不依赖 fetcher)。"""
+import pandas as pd
+import pytest
+
+from gxfc.screen import build_board_offline
+from gxfc.store.duck_store import DuckStore
+
+_DATE = "2026-07-06"
+_QUARTER = "20260630"
+
+_CONFIG = {
+    "emotion": {"hot_up_count": 4500, "cold_up_count": 800},
+    "sector": {"top_n": 10, "core_drill_top_n": 3, "core_top_n": 5},
+    "profit_fault": {"growth_threshold": 50.0},
+    "bottom_volume": {
+        "rise_threshold": 7.0, "volume_ratio_threshold": 2.0, "bottom_ratio": 0.6,
+        "bottom_window": 60, "volume_baseline": 5, "max_survivors": 60, "top_n": 50,
+    },
+}
+
+
+@pytest.fixture()
+def store(tmp_path):
+    s = DuckStore(str(tmp_path / "t.duckdb"))
+    yield s
+    s.close()
+
+
+def _seed_daily_series(store, code, closes, highs=None, volumes=None):
+    """连续交易日日K(2026-03 起,确保全部早于目标日),便于构造量比/底部场景。"""
+    n = len(closes)
+    highs = highs or closes
+    volumes = volumes or [1e6] * n
+    days = pd.date_range("2026-03-02", periods=n + 10, freq="B")[:n]
+    dates = [d.strftime("%Y-%m-%d") for d in days]
+    store.append_daily(pd.DataFrame({
+        "代码": [code] * n, "日期": dates,
+        "开盘": closes, "收盘": closes, "最高": highs, "最低": closes,
+        "成交量": volumes, "成交额": [c * v for c, v in zip(closes, volumes)],
+    }))
+    return dates
+
+
+def test_未采集时全面板降级但不崩(store):
+    board = build_board_offline(store, _DATE, _QUARTER, _CONFIG)
+    assert "未采集" in board.emotion.sentiment_hint
+    assert board.sectors.empty
+    assert board.candidates.empty
+    assert board.surge_candidates.empty
+
+
+def test_情绪段离线组装(store):
+    store.upsert_snapshot("zt_pool", "trade_date", _DATE, pd.DataFrame({
+        "代码": ["600001", "600002"], "名称": ["甲", "乙"],
+        "涨跌幅": [10.0, 10.0], "连板数": [3, 1],
+    }))
+    store.upsert_snapshot("zb_pool", "trade_date", _DATE, pd.DataFrame({
+        "代码": ["600003"], "名称": ["丙"], "涨跌幅": [5.0], "炸板次数": [1],
+    }))
+    store.log("r", "zt_pool", _DATE, "ok", rows=2)
+    store.log("r", "dt_pool", _DATE, "empty", rows=0)
+    store.log("r", "zb_pool", _DATE, "ok", rows=1)
+    # 全市场两票:一涨一跌 → 家数 1/1
+    store.append_daily(pd.DataFrame({
+        "代码": ["000001", "000002"] * 2,
+        "日期": ["2026-07-03", "2026-07-03", "2026-07-06", "2026-07-06"],
+        "开盘": [10, 5, 10, 5], "收盘": [10.0, 5.0, 11.0, 4.5],
+        "最高": [10, 5, 11, 5], "最低": [10, 4, 10, 4.4],
+        "成交量": [1e6] * 4, "成交额": [1e7] * 4,
+    }))
+
+    board = build_board_offline(store, _DATE, _QUARTER, _CONFIG)
+    e = board.emotion
+    assert e.limit_up == 2 and e.limit_down == 0
+    assert e.highest_streak == 3
+    assert e.broken_board_rate == pytest.approx(1 / 3)
+    assert e.up_count == 1 and e.down_count == 1
+
+
+def test_板块段离线组装(store):
+    store.upsert_snapshot("industry_board", "trade_date", _DATE, pd.DataFrame({
+        "板块名称": ["半导体", "白酒"], "涨跌幅": [3.0, 1.0], "领涨股票": ["甲", "乙"],
+    }))
+    store.upsert_snapshot("industry_cons", "trade_date", _DATE, pd.DataFrame({
+        "板块名称": ["半导体", "半导体"], "名称": ["甲", "丁"],
+        "涨跌幅": [10.0, 8.0], "成交额": [1e8, 5e7],
+    }))
+    board = build_board_offline(store, _DATE, _QUARTER, _CONFIG)
+    assert list(board.sectors["板块名称"]) == ["半导体", "白酒"]
+    assert "半导体" in board.sector_cores
+    assert list(board.sector_cores["半导体"]["名称"]) == ["甲", "丁"]
+
+
+def test_断层段离线组装_含跳空(store):
+    store.upsert_snapshot("yjyg", "quarter_end", _QUARTER, pd.DataFrame({
+        "股票代码": ["600001", "600002"], "股票简称": ["甲", "乙"],
+        "预测指标": ["归属于上市公司股东的净利润"] * 2,
+        "业绩变动幅度": [80.0, 30.0],   # 乙增速不达标
+    }))
+    # 甲:今开(11.0) > 昨高(10.5) → 跳空
+    store.append_daily(pd.DataFrame({
+        "代码": ["600001", "600001"], "日期": ["2026-07-03", "2026-07-06"],
+        "开盘": [10.0, 11.0], "收盘": [10.2, 11.5], "最高": [10.5, 11.8],
+        "最低": [9.9, 10.9], "成交量": [1e6, 2e6], "成交额": [1e7, 2e7],
+    }))
+    board = build_board_offline(store, _DATE, _QUARTER, _CONFIG)
+    assert list(board.candidates["股票代码"]) == ["600001"]
+
+
+def test_底部爆量段离线组装_历史严格取当日之前(store):
+    # 60001A:前期高点 20,长期缩量,目标日放量大涨至 11(距高点回落 45%)
+    closes = [20.0] + [10.0] * 58
+    volumes = [1e6] * 59
+    dates = _seed_daily_series(store, "600010", closes, volumes=volumes)
+    # 目标日行:涨 10%,量 5 倍
+    store.append_daily(pd.DataFrame({
+        "代码": ["600010"], "日期": [_DATE], "开盘": [10.0], "收盘": [11.0],
+        "最高": [11.2], "最低": [9.9], "成交量": [5e6], "成交额": [5.5e7],
+    }))
+    store.upsert_securities(pd.DataFrame({"代码": ["600010"], "名称": ["丙"]}))
+    assert dates[-1] < _DATE   # 预置历史确实都在目标日之前
+
+    board = build_board_offline(store, _DATE, _QUARTER, _CONFIG)
+    surge = board.surge_candidates
+    assert list(surge["代码"]) == ["600010"]
+    assert surge.iloc[0]["量比"] == pytest.approx(5.0)   # 量比只用之前5日均量,不含当日
+    assert surge.iloc[0]["业绩高增"] is False or surge.iloc[0]["业绩高增"] == False  # noqa: E712

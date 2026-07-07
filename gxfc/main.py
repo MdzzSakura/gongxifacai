@@ -1,8 +1,9 @@
-"""主流程:盘后一次运行,拉数 → 算因子 → 组装面板 → 打印 + 存 CSV。
+"""主流程(联网一次成型):盘后一次运行,拉数 → 算因子 → 组装面板 → 打印 + 存 CSV。
 
-build_board 接受注入的 fetcher(便于用假对象测试);run_daily 是真实入口,
-内部构建带 SQLite 缓存的 Fetcher。断层扫描仅对业绩预告里的股票拉日K,
-并用 top_codes_limit 限制数量以控制网络请求量。
+推荐用法已切换为"采集/筛选解耦":python -m gxfc.ingest 落库,python -m gxfc.screen
+离线出面板(可任意重跑不触网)。本模块保留为免落库的快速联网模式。
+build_board 接受注入的 fetcher(便于用假对象测试)。断层扫描仅对业绩预告里的
+股票拉日K,并用 top_codes_limit 限制数量以控制网络请求量。
 """
 import logging
 import sys
@@ -13,7 +14,6 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from gxfc.data.cache import DataFrameCache
 from gxfc.data.fetcher import Fetcher
 from gxfc.factors.bottom_volume import scan_bottom_volume
 from gxfc.factors.market_emotion import MarketEmotion, compute_market_emotion
@@ -186,7 +186,7 @@ def _scan_market_bottom_volume(fetcher, date: str, config: dict, high_growth_cod
 def run_daily(date: str, quarter_end: str, out_dir: str = "out") -> DailyBoard:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = load_config()
-    fetcher = Fetcher(cache=DataFrameCache("gxfc_cache.db"))
+    fetcher = Fetcher()
     board = build_board(fetcher, date, quarter_end, config)
     print(render_console(board))
     paths = save_csv(board, out_dir)
