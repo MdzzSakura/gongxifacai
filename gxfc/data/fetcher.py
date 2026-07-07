@@ -50,6 +50,7 @@ _SOURCE_PROFILE = {
     "baostock": {"interval": 0.1, "em": False},
     "新浪": {"interval": 0.5, "em": False},
     "东财": {"interval": None, "em": True},
+    "腾讯": {"interval": 0.5, "em": False},
 }
 
 # 非东财源连续失败达到该次数,本轮运行内熔断该源(东财有专门的连接级熔断)
@@ -199,6 +200,23 @@ def _em_daily_to_std_volume(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "成交量" in out.columns:
         out["成交量"] = pd.to_numeric(out["成交量"], errors="coerce") * 100
+    return out
+
+
+# 腾讯日K(stock_zh_a_hist_tx)列名映射:其 amount 列实为成交量(单位手),
+# 接口不提供成交额;仅覆盖沪深,北交所三种复权均无数据
+_TX_DAILY_RENAME = {"date": "日期", "open": "开盘", "close": "收盘",
+                    "high": "最高", "low": "最低", "amount": "成交量"}
+
+
+def _tx_daily_to_em_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """腾讯日K归一化为东财列结构:成交量手转股,成交额置 NULL(消费方判空)。"""
+    out = df.rename(columns=_TX_DAILY_RENAME)
+    if "日期" in out.columns:
+        out["日期"] = pd.to_datetime(out["日期"]).dt.strftime("%Y-%m-%d")
+    if "成交量" in out.columns:
+        out["成交量"] = pd.to_numeric(out["成交量"], errors="coerce") * 100
+    out["成交额"] = None
     return out
 
 
@@ -490,9 +508,10 @@ class Fetcher:
     def stock_daily(self, code: str, start: str, end: str) -> pd.DataFrame:
         """个股前复权日K。含 日期,开盘,最高。start/end 形如 '20260101'。
 
-        数据源优先级:Baostock(自有服务器最稳,仅沪深)→ 新浪 → 东财。北交所
-        (920/8xx/4xx)Baostock/新浪均不支持,仅能尝试东财。各源结果归一化为
-        东财列结构,成交量统一为"股"(东财原始为手,已换算)。
+        数据源优先级:Baostock(自有服务器最稳,仅沪深)→ 新浪 → 东财 → 腾讯
+        (兜底,无成交额列)。北交所(920/8xx/4xx)Baostock/新浪/腾讯均不覆盖,
+        仅能尝试东财。各源结果归一化为东财列结构,成交量统一为"股"(东财/
+        腾讯原始为手,已换算)。
         """
         import akshare as ak
         key = f"daily:{code}:{start}:{end}"
@@ -501,7 +520,7 @@ class Fetcher:
             symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
         ))
         if sina_sym.startswith("bj"):
-            # 北交所:免费源 Baostock/新浪 均不覆盖,仅东财可能有
+            # 北交所:免费源 Baostock/新浪/腾讯 均不覆盖,仅东财可能有
             sources = [("东财", em_loader)]
         else:
             sources = []
@@ -510,4 +529,6 @@ class Fetcher:
             sources.append(("新浪", lambda: _sina_daily_to_em_schema(
                 ak.stock_zh_a_daily(symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"))))
             sources.append(("东财", em_loader))
+            sources.append(("腾讯", lambda: _tx_daily_to_em_schema(ak.stock_zh_a_hist_tx(
+                symbol=sina_sym, start_date=start, end_date=end, adjust="qfq"))))
         return self._fetch_first_ok(key, sources)

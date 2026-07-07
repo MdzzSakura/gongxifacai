@@ -292,12 +292,50 @@ def test_北交所日K仅尝试东财_免费源不调用(monkeypatch):
     fetcher = Fetcher(retries=3, min_interval=0)
     monkeypatch.setattr(fetcher_mod, "_baostock_daily", lambda *a: pytest.fail("北交所不应调用baostock"))
     monkeypatch.setattr(ak, "stock_zh_a_daily", lambda **k: pytest.fail("北交所不应调用新浪"))
+    monkeypatch.setattr(ak, "stock_zh_a_hist_tx", lambda **k: pytest.fail("北交所不应调用腾讯(不覆盖)"))
     monkeypatch.setattr(
         ak, "stock_zh_a_hist",
         lambda **k: (_ for _ in ()).throw(ConnectionError("RemoteDisconnected")),
     )
     with pytest.raises(Exception):
         fetcher.stock_daily("920136", "20260620", "20260630")
+
+
+def test_日K腾讯第四路兜底并归一化(monkeypatch):
+    """baostock/新浪/东财全挂时,腾讯兜底:date/open/close/high/low/amount(手)
+    归一化为东财列结构,成交量手转股,无成交额列置 NULL(消费方判空)。"""
+    import akshare as ak
+    fetcher = Fetcher(retries=1, min_interval=0)
+    monkeypatch.setattr(
+        fetcher_mod, "_baostock_daily",
+        lambda code, s, e: (_ for _ in ()).throw(RuntimeError("baostock 挂了")),
+    )
+    monkeypatch.setattr(
+        ak, "stock_zh_a_daily",
+        lambda **k: (_ for _ in ()).throw(RuntimeError("新浪挂了")),
+    )
+    monkeypatch.setattr(
+        ak, "stock_zh_a_hist",
+        lambda **k: (_ for _ in ()).throw(ConnectionError("东财被风控")),
+    )
+
+    def 腾讯成功(symbol, **kwargs):
+        assert symbol == "sz001237"  # 腾讯与新浪同用 sh/sz 前缀格式
+        assert kwargs.get("adjust") == "qfq"
+        return pd.DataFrame({
+            "date": ["2026-06-26", "2026-06-29"],
+            "open": [62.0, 64.0], "close": [59.0, 65.0],
+            "high": [63.0, 65.2], "low": [58.0, 63.9],
+            "amount": [1000.0, 2000.0],   # 腾讯该列实为成交量,单位手
+        })
+
+    monkeypatch.setattr(ak, "stock_zh_a_hist_tx", 腾讯成功)
+    df = fetcher.stock_daily("001237", "20260620", "20260630")
+    assert list(df["日期"]) == ["2026-06-26", "2026-06-29"]
+    assert {"开盘", "收盘", "最高", "最低", "成交量", "成交额"} <= set(df.columns)
+    assert df.iloc[0]["成交量"] == 100000     # 手 → 股
+    assert df["成交额"].isna().all()          # 腾讯无成交额
+    assert fetcher.health["腾讯"]["ok"] == 1
 
 
 # —— 全市场日K快照(快照一次成型) ——
