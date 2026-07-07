@@ -70,10 +70,15 @@ def refresh_calendar(fetcher: Fetcher, store: DuckStore, now: datetime) -> None:
             raise RuntimeError(f"交易日历不可用且本地无覆盖,无法采集:{err}") from err
 
 
+def _is_closed(now: datetime) -> bool:
+    """当前时刻是否已过收盘(不关心今天是否交易日)。"""
+    return now.hour > _CLOSE_HOUR or (now.hour == _CLOSE_HOUR and now.minute >= _CLOSE_MINUTE)
+
+
 def latest_closed_trading_day(store: DuckStore, now: datetime) -> str:
     """最新已收盘交易日('YYYY-MM-DD'):收盘后取今天(若为交易日),否则回溯。"""
     today = now.strftime("%Y-%m-%d")
-    closed = now.hour > _CLOSE_HOUR or (now.hour == _CLOSE_HOUR and now.minute >= _CLOSE_MINUTE)
+    closed = _is_closed(now)
     days = store.trading_days((now - timedelta(days=30)).strftime("%Y-%m-%d"), today)
     if not days:
         raise RuntimeError("近30天无交易日历数据,请检查日历采集")
@@ -323,12 +328,22 @@ def run_ingest(date: Optional[str] = None, db_path: str = "gxfc_data.duckdb",
         if target not in store.trading_days(target, target):
             logger.warning("%s 非交易日,退出", target)
             return store.run_summary(run_id)
+        if target > latest:
+            logger.warning("目标日 %s 尚未收盘(最新已收盘交易日:%s),拒绝采集以免落盘中残缺数据",
+                           target, latest)
+            return store.run_summary(run_id)
         is_current = target == latest
         logger.info("采集目标日:%s(最新已收盘交易日:%s)run_id=%s", target, latest, run_id)
 
         ingest_snapshots(fetcher, store, run_id, target, is_current, config)
-        if is_current:
+        # 实时快照反映"当下"行情:今天是交易日且未收盘时,快照是今日盘中价,
+        # 不是任何一天的完整日K,写库会污染 OHLC 与成交量,必须跳过走逐股回补
+        today = now.strftime("%Y-%m-%d")
+        snapshot_live = not _is_closed(now) and bool(store.trading_days(today, today))
+        if is_current and not snapshot_live:
             ingest_daily_snapshot(fetcher, store, run_id, target)
+        elif is_current:
+            logger.warning("盘中运行:实时快照为今日盘中价,跳过快照,%s 日K交由逐股回补", target)
         else:
             logger.info("目标日非最新交易日,当日日K交由逐股回补补齐")
         ingest_backfill(fetcher, store, run_id, target, limit=limit)

@@ -233,6 +233,29 @@ def test_日K快照失败降级_当日交由回补(store):
     assert store.has_ok("daily_snapshot", "2026-07-06") is False
 
 
+def test_盘中运行_快照跳过走回补(store):
+    """盘中跑采集:目标日是上一交易日,但实时快照反映的是今天盘中价,
+    绝不能当作目标日的日K写库(会污染 OHLC 与成交量),当日行走逐股回补。"""
+    f = FakeFetcher()
+    store.upsert_securities(pd.DataFrame({"代码": ["600001"], "名称": ["甲"]}))
+    run_ingest(fetcher=f, store=store, now=datetime(2026, 7, 7, 10, 0))  # 盘中,目标日 07-06
+
+    assert f.calls.get("daily_snapshot") is None          # 快照一次都不能拉
+    assert store.has_ok("daily_snapshot", "2026-07-06") is False
+    # 07-06 的日K由逐股回补补齐(来源是真正的日K接口,非实时快照)
+    assert not store.read_daily("600001", "20260706", "20260706").empty
+
+
+def test_显式指定未收盘日_拒绝采集(store):
+    """显式传今天的日期但尚未收盘:拒绝采集(否则快照/回补都会拿到盘中残缺数据)。"""
+    f = FakeFetcher()
+    summary = run_ingest(date="20260707", fetcher=f, store=store,
+                         now=datetime(2026, 7, 7, 10, 0))
+    assert f.calls.get("daily_snapshot") is None
+    assert f.calls.get("zt_pool") is None
+    assert len(summary) == 0
+
+
 def test_非交易日直接退出(store):
     f = FakeFetcher()
     summary = run_ingest(date="20260705", fetcher=f, store=store, now=_NOW)  # 周日
