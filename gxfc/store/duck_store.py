@@ -48,6 +48,14 @@ class DuckStore:
     def close(self) -> None:
         self._con.close()
 
+    @property
+    def con(self):
+        """底层 duckdb 连接,供 JournalStore 等同库扩展表复用。
+
+        DuckDB 同一文件仅允许单写者:扩展表必须共用本连接,勿另开连接。
+        """
+        return self._con
+
     # —— 通用 ——
 
     def table_exists(self, table: str) -> bool:
