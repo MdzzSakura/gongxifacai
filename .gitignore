@@ -7,4 +7,5 @@ out/
 venv/
 xingqiudocs/
 *.duckdb
+*.duckdb.wal
 .idea/
