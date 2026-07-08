@@ -17,6 +17,9 @@ def track_one(daily_window: pd.DataFrame, signal_date: str,
     """单信号前向收益。daily_window 为该票自信号日起的日K(可含更晚数据)。
 
     信号日无行或收盘非正返回 None(调用方计入"不可追踪")。
+
+    注意:"区间最大回撤%" 为区间(未来 max(horizons) 个交易行)最低点相对
+    入场基准的收益,不是真正的峰谷回撤口径;单边上涨行情下该值可能为正。
     """
     if daily_window is None or daily_window.empty:
         return None
@@ -71,6 +74,8 @@ def summarize(perf: pd.DataFrame, horizons: Sequence[int] = (1, 3, 5, 10)) -> pd
     """按 策略×持有期 汇总:样本数/胜率/平均收益(即期望值)/中位收益/盈亏比。
 
     胜率 = 收益>0 占比;盈亏比 = 平均盈利 / |平均亏损|(无亏损样本记 None)。
+    盈亏比仅统计严格盈利(>0)与严格亏损(<0)样本,收益恰为 0 的平盘样本
+    不计入盈亏比分子分母(不拉低平均亏损、不虚抬盈亏比),但仍计入样本数与胜率分母。
     收益为 None(未来行不足)的信号不计入该持有期样本。
     """
     cols = ["策略", "持有期", "样本数", "胜率%", "平均收益%", "中位收益%", "盈亏比"]
@@ -86,7 +91,7 @@ def summarize(perf: pd.DataFrame, horizons: Sequence[int] = (1, 3, 5, 10)) -> pd
             vals = pd.to_numeric(g[col], errors="coerce").dropna()
             if vals.empty:
                 continue
-            wins, losses = vals[vals > 0], vals[vals <= 0]
+            wins, losses = vals[vals > 0], vals[vals < 0]
             pl = None
             if len(wins) and len(losses) and losses.mean() != 0:
                 pl = round(float(wins.mean() / abs(losses.mean())), 2)

@@ -64,3 +64,36 @@ def test_汇总胜率与盈亏比():
     assert row["胜率%"] == 66.7
     assert row["平均收益%"] == 8.33
     assert row["盈亏比"] == 3.0             # 平均盈利15 / |平均亏损5|
+
+
+def test_盈亏比排除平盘():
+    perf = pd.DataFrame({
+        "strategy": ["s", "s", "s"],
+        "可追踪": [True, True, True],
+        "T+1收益%": [10.0, 0.0, -5.0],
+    })
+    got = summarize(perf, horizons=(1,))
+    row = got.iloc[0]
+    assert row["样本数"] == 3               # 平盘计入样本数
+    assert row["胜率%"] == 33.3             # 仅 10.0 > 0
+    assert row["盈亏比"] == 2.0             # 平均盈利10 / |平均亏损-5|,平盘不参与
+
+
+def test_无亏损样本盈亏比为None():
+    perf = pd.DataFrame({
+        "strategy": ["s", "s"],
+        "可追踪": [True, True],
+        "T+1收益%": [10.0, 20.0],
+    })
+    got = summarize(perf, horizons=(1,))
+    row = got.iloc[0]
+    assert row["盈亏比"] is None
+
+
+def test_未来行为空最大涨跌为None():
+    win = _win([
+        ["600000", "2026-07-07", 10.0, 10.0, 10.5, 9.8, 100, 1000, 1.0],
+    ])
+    out = track_one(win, "2026-07-07", horizons=(1,))
+    assert out["区间最大涨幅%"] is None
+    assert out["区间最大回撤%"] is None
