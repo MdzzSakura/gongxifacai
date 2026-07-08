@@ -88,3 +88,50 @@ class JournalStore:
             params.append(dash(end))
         sql += ' ORDER BY signal_date, strategy, "代码"'
         return self._con.execute(sql, params).df()
+
+    # —— 交易日志 ——
+
+    def _next_trade_id(self, open_date: str) -> str:
+        """按开仓日生成 T<YYYYMMDD>-<3位序号>(同日自增)。"""
+        d = dash(open_date).replace("-", "")
+        row = self._con.execute(
+            "SELECT count(*) FROM trades WHERE trade_id LIKE ?", [f"T{d}-%"]
+        ).fetchone()
+        return f"T{d}-{row[0] + 1:03d}"
+
+    def add_trade(self, code: str, name: str, strategy: str, plan: str,
+                  open_date: str, open_price: float, shares: int) -> str:
+        """开仓:计划(plan)是买入理由+卖出规则,开仓时必须写全。返回 trade_id。"""
+        trade_id = self._next_trade_id(open_date)
+        self._con.execute(
+            "INSERT INTO trades VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
+            "NULL, NULL, NULL, NULL, NULL)",
+            [trade_id, str(code).strip().zfill(6), name, strategy, plan,
+             dash(open_date), float(open_price), int(shares)],
+        )
+        return trade_id
+
+    def close_trade(self, trade_id: str, close_date: str, close_price: float,
+                    exit_reason: str, followed_plan: bool, note: str = "") -> None:
+        """平仓:记录执行结果与是否守纪。不存在或已平仓抛 ValueError。"""
+        row = self._con.execute(
+            "SELECT close_date FROM trades WHERE trade_id = ?", [trade_id]
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"交易 {trade_id} 不存在")
+        if row[0] is not None:
+            raise ValueError(f"交易 {trade_id} 已平仓({row[0]}),不可重复平仓")
+        self._con.execute(
+            "UPDATE trades SET close_date = ?, close_price = ?, exit_reason = ?, "
+            "followed_plan = ?, note = ? WHERE trade_id = ?",
+            [dash(close_date), float(close_price), exit_reason,
+             bool(followed_plan), note, trade_id],
+        )
+
+    def list_trades(self, open_only: bool = False) -> pd.DataFrame:
+        """交易清单;open_only=True 只看持仓中。按开仓日+编号升序。"""
+        sql = "SELECT * FROM trades"
+        if open_only:
+            sql += " WHERE close_date IS NULL"
+        sql += " ORDER BY open_date, trade_id"
+        return self._con.execute(sql).df()

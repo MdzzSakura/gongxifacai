@@ -53,3 +53,30 @@ def test_按日期与策略过滤(stores):
     assert len(j.read_signals(strategy="profit_fault")) == 1
     assert len(j.read_signals(start="20260707")) == 1
     assert len(j.read_signals(end="20260706")) == 1
+
+
+def test_开仓自动编号与持仓清单(stores):
+    _, j = stores
+    tid1 = j.add_trade("600000", "甲", "profit_fault", "断层+情绪回暖,破5日线止损",
+                       "20260707", 10.0, 1000)
+    tid2 = j.add_trade("1", "乙", "bottom_volume", "爆量首板,烂板即走",
+                       "20260707", 5.0, 2000)
+    assert tid1 == "T20260707-001"
+    assert tid2 == "T20260707-002"
+    trades = j.list_trades(open_only=True)
+    assert len(trades) == 2
+    assert list(trades["代码"]) == ["600000", "000001"]  # zfill(6),按开仓日+编号排序
+
+
+def test_平仓与重复平仓拒绝(stores):
+    _, j = stores
+    tid = j.add_trade("600000", "甲", "profit_fault", "断层", "20260707", 10.0, 1000)
+    j.close_trade(tid, "20260710", 11.0, "规则卖点", True, "按计划止盈")
+    assert j.list_trades(open_only=True).empty
+    closed = j.list_trades().iloc[0]
+    assert closed["close_price"] == 11.0
+    assert bool(closed["followed_plan"]) is True
+    with pytest.raises(ValueError, match="已平仓"):
+        j.close_trade(tid, "20260711", 12.0, "x", True)
+    with pytest.raises(ValueError, match="不存在"):
+        j.close_trade("T20990101-001", "20260711", 12.0, "x", True)
