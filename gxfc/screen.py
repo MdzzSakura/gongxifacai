@@ -27,6 +27,7 @@ from gxfc.factors.sector import core_stocks, rank_sectors
 from gxfc.dates import dash, derive_quarter_end
 from gxfc.review.daily_board import DailyBoard, render_console, save_csv
 from gxfc.store.duck_store import DuckStore
+from gxfc.store.journal_store import JournalStore
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,11 @@ def run_screen(date: Optional[str] = None, db_path: str = "gxfc_data.duckdb",
         print(render_console(board))
         paths = save_csv(board, out_dir)
         logger.info("已保存:%s", paths)
+        journal = JournalStore(store.con)
+        pf = board.candidates.rename(columns={"股票代码": "代码", "股票简称": "名称"})
+        n_pf = journal.record_signals(target, "profit_fault", pf)
+        n_bv = journal.record_signals(target, "bottom_volume", board.surge_candidates)
+        logger.info("信号落库:断层 %d 条,底部爆量 %d 条(重跑同日自动覆盖)", n_pf, n_bv)
         return board
     finally:
         store.close()
