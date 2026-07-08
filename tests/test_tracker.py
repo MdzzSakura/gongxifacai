@@ -118,6 +118,21 @@ def test_交易纪律统计分组():
     assert broke["胜率%"] == 0.0            # 纪律成本一目了然
 
 
+def test_纪律统计排除平盘():
+    trades = pd.DataFrame({
+        "open_price": [10.0, 10.0, 10.0],
+        "close_price": [12.0, 9.0, 10.0],   # 第三笔平进平出(0%),不应计入盈亏比
+        "shares": [1000, 1000, 1000],
+        "close_date": ["2026-07-10", "2026-07-10", "2026-07-10"],
+        "followed_plan": [True, True, True],
+    })
+    got = trade_stats(trades)
+    all_row = got[got["分组"] == "全部"].iloc[0]
+    assert all_row["笔数"] == 3             # 平盘计入笔数
+    assert all_row["胜率%"] == 33.3         # 仅 12.0 一笔严格盈利,3笔中占1笔
+    assert all_row["盈亏比"] == 2.0         # 收益% = 20.0/-10.0/0.0,平盘不参与:20/10=2.0
+
+
 def test_无已平仓交易返回空表():
     trades = pd.DataFrame({
         "open_price": [10.0], "close_price": [None], "shares": [100],

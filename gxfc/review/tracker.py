@@ -110,6 +110,8 @@ def trade_stats(trades: pd.DataFrame) -> pd.DataFrame:
 
     收益% 按价格算(不含费用),总盈亏 = (平仓价-开仓价)×股数 汇总。
     未平仓交易不计入;无已平仓交易返回空表。
+    盈亏比只统计严格盈利(>0)/严格亏损(<0),平盘(收益恰为0)不计入分子分母,
+    与 summarize 口径一致;但仍计入笔数与胜率分母。
     """
     cols = ["分组", "笔数", "胜率%", "平均收益%", "盈亏比", "总盈亏"]
     if trades.empty:
@@ -119,8 +121,8 @@ def trade_stats(trades: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
     groups = [
         ("全部", closed),
-        ("按计划", closed[closed["followed_plan"] == True]),      # noqa: E712(pandas 布尔过滤)
-        ("未按计划", closed[closed["followed_plan"] == False]),   # noqa: E712
+        ("按计划", closed[closed["followed_plan"] == True]),      # noqa: E712  # pandas 布尔过滤
+        ("未按计划", closed[closed["followed_plan"] == False]),   # noqa: E712  # pandas 布尔过滤
     ]
     rows = []
     for label, g in groups:
@@ -129,7 +131,7 @@ def trade_stats(trades: pd.DataFrame) -> pd.DataFrame:
         ret = (pd.to_numeric(g["close_price"]) / pd.to_numeric(g["open_price"]) - 1) * 100
         pnl = (pd.to_numeric(g["close_price"]) - pd.to_numeric(g["open_price"])) \
             * pd.to_numeric(g["shares"])
-        wins, losses = ret[ret > 0], ret[ret <= 0]
+        wins, losses = ret[ret > 0], ret[ret < 0]
         pl = None
         if len(wins) and len(losses) and losses.mean() != 0:
             pl = round(float(wins.mean() / abs(losses.mean())), 2)

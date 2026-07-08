@@ -55,22 +55,26 @@ def main(argv=None) -> int:
     store = DuckStore(args.db)
     try:
         journal = JournalStore(store.con)
-        if args.cmd == "add":
-            tid = journal.add_trade(args.code, args.name, args.strategy, args.plan,
-                                    args.date, args.price, args.shares)
-            print(f"已开仓 {tid}:{args.code} {args.shares}股 @ {args.price}")
-        elif args.cmd == "close":
-            journal.close_trade(args.trade_id, args.date, args.price,
-                                args.reason, args.followed, args.note)
-            print(f"已平仓 {args.trade_id}")
-        elif args.cmd == "list":
-            trades = journal.list_trades(open_only=args.open)
-            print(tabulate(trades, headers="keys", tablefmt="grid", showindex=False)
-                  if not trades.empty else "(无记录)")
-        elif args.cmd == "stats":
-            stats = trade_stats(journal.list_trades())
-            print(tabulate(stats, headers="keys", tablefmt="grid", showindex=False)
-                  if not stats.empty else "(无已平仓交易,统计从首笔平仓后开始)")
+        try:
+            if args.cmd == "add":
+                tid = journal.add_trade(args.code, args.name, args.strategy, args.plan,
+                                        args.date, args.price, args.shares)
+                print(f"已开仓 {tid}:{args.code} {args.shares}股 @ {args.price}")
+            elif args.cmd == "close":
+                journal.close_trade(args.trade_id, args.date, args.price,
+                                    args.reason, args.followed, args.note)
+                print(f"已平仓 {args.trade_id}")
+            elif args.cmd == "list":
+                trades = journal.list_trades(open_only=args.open)
+                print(tabulate(trades, headers="keys", tablefmt="grid", showindex=False)
+                      if not trades.empty else "(无记录)")
+            elif args.cmd == "stats":
+                stats = trade_stats(journal.list_trades())
+                print(tabulate(stats, headers="keys", tablefmt="grid", showindex=False)
+                      if not stats.empty else "(无已平仓交易,统计从首笔平仓后开始)")
+        except ValueError as err:
+            print(f"错误:{err}")
+            return 1
         return 0
     finally:
         store.close()

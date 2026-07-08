@@ -20,3 +20,10 @@ def test_清单空库友好提示(tmp_path, capsys):
     db = str(tmp_path / "t.duckdb")
     assert jmain(["--db", db, "list"]) == 0
     assert "无记录" in capsys.readouterr().out
+
+
+def test_平仓不存在编号友好报错(tmp_path, capsys):
+    db = str(tmp_path / "t.duckdb")
+    assert jmain(["--db", db, "close", "T20990101-001", "--date", "20260710",
+                  "--price", "12", "--reason", "规则卖点", "--followed"]) == 1
+    assert "错误" in capsys.readouterr().out
