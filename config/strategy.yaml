@@ -26,3 +26,7 @@ bottom_volume:
   volume_baseline: 5            # 量比基准(前N日均量)
   max_survivors: 60             # 粗筛后按涨幅取前N只精算(上限,控制耗时)
   top_n: 50                     # 面板展示条数
+
+# 信号前向收益追踪
+tracking:
+  horizons: [1, 3, 5, 10]   # 评估持有期(信号日之后第 N 个交易日,收盘对收盘)
