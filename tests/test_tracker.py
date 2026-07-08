@@ -1,7 +1,7 @@
 """信号前向收益追踪纯函数测试。"""
 import pandas as pd
 
-from gxfc.review.tracker import summarize, track_one, track_signals
+from gxfc.review.tracker import summarize, track_one, track_signals, trade_stats
 
 _COLS = ["代码", "日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"]
 
@@ -97,3 +97,30 @@ def test_未来行为空最大涨跌为None():
     out = track_one(win, "2026-07-07", horizons=(1,))
     assert out["区间最大涨幅%"] is None
     assert out["区间最大回撤%"] is None
+
+
+def test_交易纪律统计分组():
+    trades = pd.DataFrame({
+        "open_price": [10.0, 10.0, 10.0, 10.0],
+        "close_price": [12.0, 9.0, 11.0, None],   # 最后一笔未平仓,不计入
+        "shares": [1000, 1000, 1000, 1000],
+        "close_date": ["2026-07-10", "2026-07-10", "2026-07-10", None],
+        "followed_plan": [True, False, True, None],
+    })
+    got = trade_stats(trades)
+    all_row = got[got["分组"] == "全部"].iloc[0]
+    assert all_row["笔数"] == 3
+    assert all_row["胜率%"] == 66.7
+    assert all_row["总盈亏"] == 2000.0      # +2000 -1000 +1000
+    follow = got[got["分组"] == "按计划"].iloc[0]
+    broke = got[got["分组"] == "未按计划"].iloc[0]
+    assert follow["胜率%"] == 100.0
+    assert broke["胜率%"] == 0.0            # 纪律成本一目了然
+
+
+def test_无已平仓交易返回空表():
+    trades = pd.DataFrame({
+        "open_price": [10.0], "close_price": [None], "shares": [100],
+        "close_date": [None], "followed_plan": [None],
+    })
+    assert trade_stats(trades).empty

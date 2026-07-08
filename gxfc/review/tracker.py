@@ -103,3 +103,41 @@ def summarize(perf: pd.DataFrame, horizons: Sequence[int] = (1, 3, 5, 10)) -> pd
                 "盈亏比": pl,
             })
     return pd.DataFrame(rows, columns=cols)
+
+
+def trade_stats(trades: pd.DataFrame) -> pd.DataFrame:
+    """已平仓交易统计,分 全部/按计划/未按计划 三组对比——两组期望值之差即纪律成本。
+
+    收益% 按价格算(不含费用),总盈亏 = (平仓价-开仓价)×股数 汇总。
+    未平仓交易不计入;无已平仓交易返回空表。
+    """
+    cols = ["分组", "笔数", "胜率%", "平均收益%", "盈亏比", "总盈亏"]
+    if trades.empty:
+        return pd.DataFrame(columns=cols)
+    closed = trades.dropna(subset=["close_date"]).copy()
+    if closed.empty:
+        return pd.DataFrame(columns=cols)
+    groups = [
+        ("全部", closed),
+        ("按计划", closed[closed["followed_plan"] == True]),      # noqa: E712(pandas 布尔过滤)
+        ("未按计划", closed[closed["followed_plan"] == False]),   # noqa: E712
+    ]
+    rows = []
+    for label, g in groups:
+        if g.empty:
+            continue
+        ret = (pd.to_numeric(g["close_price"]) / pd.to_numeric(g["open_price"]) - 1) * 100
+        pnl = (pd.to_numeric(g["close_price"]) - pd.to_numeric(g["open_price"])) \
+            * pd.to_numeric(g["shares"])
+        wins, losses = ret[ret > 0], ret[ret <= 0]
+        pl = None
+        if len(wins) and len(losses) and losses.mean() != 0:
+            pl = round(float(wins.mean() / abs(losses.mean())), 2)
+        rows.append({
+            "分组": label, "笔数": len(g),
+            "胜率%": round(len(wins) / len(g) * 100, 1),
+            "平均收益%": round(float(ret.mean()), 2),
+            "盈亏比": pl,
+            "总盈亏": round(float(pnl.sum()), 2),
+        })
+    return pd.DataFrame(rows, columns=cols)
