@@ -17,6 +17,8 @@ from typing import Iterable, List, Optional
 import duckdb
 import pandas as pd
 
+from gxfc.dates import dash
+
 logger = logging.getLogger(__name__)
 
 # daily 表固定列(东财中文列口径,全源归一后统一;成交量单位=股)
@@ -35,14 +37,6 @@ _DDL = [
     '''CREATE TABLE IF NOT EXISTS securities (
         "代码" TEXT PRIMARY KEY, "名称" TEXT)''',
 ]
-
-
-def _dash(date: str) -> str:
-    """'YYYYMMDD' 或 'YYYY-MM-DD' → 'YYYY-MM-DD'(库内统一口径)。"""
-    d = str(date).strip()
-    if len(d) == 8 and d.isdigit():
-        return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
-    return d
 
 
 class DuckStore:
@@ -83,7 +77,7 @@ class DuckStore:
         if df is None or df.empty:
             return 0
         data = df.copy()
-        data.insert(0, period_col, _dash(period) if period_col == "trade_date" else str(period))
+        data.insert(0, period_col, dash(period) if period_col == "trade_date" else str(period))
         self._con.register("_snap_v", data)
         try:
             if not self.table_exists(table):
@@ -109,7 +103,7 @@ class DuckStore:
         """读某期快照;表不存在或无该期数据返回空表。"""
         if not self.table_exists(table):
             return pd.DataFrame()
-        period = _dash(period) if period_col == "trade_date" else str(period)
+        period = dash(period) if period_col == "trade_date" else str(period)
         return self._con.execute(
             f'SELECT * FROM "{table}" WHERE "{period_col}" = ?', [period]
         ).df()
@@ -121,7 +115,7 @@ class DuckStore:
         if df is None or df.empty:
             return 0
         data = df.copy()
-        data["日期"] = data["日期"].map(_dash)
+        data["日期"] = data["日期"].map(dash)
         data["代码"] = data["代码"].astype(str).str.zfill(6)
         for col in _DAILY_COLS:
             if col not in data.columns:
@@ -147,7 +141,7 @@ class DuckStore:
         """读单票日K窗口(闭区间),按日期升序。start/end 兼容 'YYYYMMDD'。"""
         return self._con.execute(
             'SELECT * FROM daily WHERE "代码" = ? AND "日期" BETWEEN ? AND ? ORDER BY "日期"',
-            [str(code).zfill(6), _dash(start), _dash(end)],
+            [str(code).zfill(6), dash(start), dash(end)],
         ).df()
 
     def daily_last_close(self) -> pd.DataFrame:
@@ -176,7 +170,7 @@ class DuckStore:
         涨跌幅由 daily 表当日收盘对上一有效收盘现算,口径与实时快照一致;
         当日无行的票(停牌/未采集)自然缺席。供 screen 的情绪家数与底部爆量粗筛。
         """
-        d = _dash(date)
+        d = dash(date)
         return self._con.execute(
             '''WITH r AS (
                  SELECT "代码", "日期", "收盘", "成交量", "成交额",
@@ -202,7 +196,7 @@ class DuckStore:
     # —— 交易日历 ——
 
     def upsert_calendar(self, dates: Iterable[str]) -> None:
-        df = pd.DataFrame({"calendar_date": [_dash(d) for d in dates]})
+        df = pd.DataFrame({"calendar_date": [dash(d) for d in dates]})
         if df.empty:
             return
         self._con.register("_cal_v", df)
@@ -218,7 +212,7 @@ class DuckStore:
         rows = self._con.execute(
             "SELECT calendar_date FROM trade_calendar "
             "WHERE calendar_date BETWEEN ? AND ? ORDER BY calendar_date",
-            [_dash(start), _dash(end)],
+            [dash(start), dash(end)],
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -229,7 +223,7 @@ class DuckStore:
     def prev_trading_day(self, date: str) -> Optional[str]:
         row = self._con.execute(
             "SELECT max(calendar_date) FROM trade_calendar WHERE calendar_date < ?",
-            [_dash(date)],
+            [dash(date)],
         ).fetchone()
         return row[0]
 

@@ -24,9 +24,9 @@ from gxfc.factors.bottom_volume import scan_bottom_volume
 from gxfc.factors.market_emotion import MarketEmotion, compute_market_emotion
 from gxfc.factors.profit_fault import passes_growth, scan_profit_fault
 from gxfc.factors.sector import core_stocks, rank_sectors
-from gxfc.ingest import derive_quarter_end
+from gxfc.dates import dash, derive_quarter_end
 from gxfc.review.daily_board import DailyBoard, render_console, save_csv
-from gxfc.store.duck_store import DuckStore, _dash
+from gxfc.store.duck_store import DuckStore
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def _profit_fault_offline(store: DuckStore, date: str, quarter_end: str,
                 high_growth_codes.add(code)
 
     yjyg = yjyg_full.head(top_codes_limit)
-    end_dt = datetime.strptime(_dash(date), "%Y-%m-%d")
+    end_dt = datetime.strptime(dash(date), "%Y-%m-%d")
     start = (end_dt - timedelta(days=_FAULT_WINDOW_DAYS)).strftime("%Y-%m-%d")
     daily_map = {}
     for code in dict.fromkeys(str(c) for c in yjyg["股票代码"] if c):
@@ -122,7 +122,7 @@ def _surge_offline(store: DuckStore, date: str, config: dict, high_growth_codes:
     if hit > max_survivors:
         logger.warning("底部爆量:命中 %d 只超上限,按涨幅取前 %d 只精算", hit, max_survivors)
 
-    end_dt = datetime.strptime(_dash(date), "%Y-%m-%d")
+    end_dt = datetime.strptime(dash(date), "%Y-%m-%d")
     start = (end_dt - timedelta(days=_SURGE_WINDOW_DAYS)).strftime("%Y-%m-%d")
     prev_day = (end_dt - timedelta(days=1)).strftime("%Y-%m-%d")
     daily_map = {}
@@ -144,7 +144,7 @@ def _surge_offline(store: DuckStore, date: str, config: dict, high_growth_codes:
 def build_board_offline(store: DuckStore, date: str, quarter_end: str, config: dict,
                         top_codes_limit: int = 20) -> DailyBoard:
     """从本地库组装每日面板。各段独立降级:某数据集未采集只影响该段。"""
-    date = _dash(date)
+    date = dash(date)
     emotion = _emotion_offline(store, date, config["emotion"])
     sectors, sector_cores = _sectors_offline(store, date, config["sector"])
     candidates, high_growth = _profit_fault_offline(
@@ -164,7 +164,7 @@ def run_screen(date: Optional[str] = None, db_path: str = "gxfc_data.duckdb",
     config = load_config()
     store = DuckStore(db_path)
     try:
-        target = _dash(date) if date else store.daily_max_date()
+        target = dash(date) if date else store.daily_max_date()
         if target is None:
             raise SystemExit("本地库无日K数据,请先运行 python -m gxfc.ingest")
         quarter_end = derive_quarter_end(target)

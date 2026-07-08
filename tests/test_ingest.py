@@ -4,9 +4,9 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from gxfc.dates import derive_quarter_end
 from gxfc.ingest import (
     IngestAborted,
-    derive_quarter_end,
     latest_closed_trading_day,
     run_ingest,
 )
