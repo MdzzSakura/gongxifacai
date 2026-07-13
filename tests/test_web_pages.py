@@ -44,3 +44,23 @@ def test_信号追踪页无信号空态(tmp_path, monkeypatch):
     at = at.run()
     assert not at.exception
     assert any("gxfc.screen" in str(i.value) for i in at.info)
+
+
+def test_交易日志页渲染(seeded_db, monkeypatch):
+    at = _run_app(seeded_db, monkeypatch)
+    at.sidebar.radio[0].set_value("📝 交易日志")
+    at = at.run()
+    assert not at.exception
+    # 已有一笔平仓交易:纪律统计表出现"按计划"分组
+    assert len(at.dataframe) >= 1
+
+
+def test_交易日志页空库(tmp_path, monkeypatch):
+    from gxfc.store.duck_store import DuckStore
+    db = str(tmp_path / "notrade.duckdb")
+    DuckStore(db).close()
+    at = _run_app(db, monkeypatch)
+    at.sidebar.radio[0].set_value("📝 交易日志")
+    at = at.run()
+    assert not at.exception
+    assert any("无已平仓交易" in str(i.value) for i in at.info)
