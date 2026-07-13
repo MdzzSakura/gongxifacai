@@ -40,10 +40,12 @@ _DDL = [
 
 
 class DuckStore:
-    def __init__(self, db_path: str):
-        self._con = duckdb.connect(db_path)
-        for ddl in _DDL:
-            self._con.execute(ddl)
+    def __init__(self, db_path: str, read_only: bool = False):
+        """read_only=True 供展示层短连接使用:只读模式连接、跳过 DDL、不占写锁。"""
+        self._con = duckdb.connect(db_path, read_only=read_only)
+        if not read_only:
+            for ddl in _DDL:
+                self._con.execute(ddl)
 
     def close(self) -> None:
         self._con.close()
