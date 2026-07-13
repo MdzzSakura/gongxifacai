@@ -30,6 +30,9 @@ def test_信号追踪页渲染(seeded_db, monkeypatch):
     assert not at.exception
     # 有信号：策略下拉存在且包含 profit_fault
     assert "profit_fault" in at.selectbox[0].options
+    # 内容级断言：汇总表 + 明细表都已渲染（seeded_db 的信号 T+1/T+3 可评估，summary 非空）
+    assert len(at.dataframe) >= 2
+    assert any("汇总" in str(s.value) for s in at.subheader)
 
 
 def test_信号追踪页无信号空态(tmp_path, monkeypatch):
