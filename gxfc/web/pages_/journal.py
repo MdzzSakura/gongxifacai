@@ -56,7 +56,7 @@ def _submit(argv: list) -> None:
 def _add_form(db_path: str) -> None:
     st.subheader("开仓(先写计划再下单)")
     strategies = queries.signal_strategies(db_path) + ["手动"]
-    with st.form("add_trade", clear_on_submit=True):
+    with st.form("add_trade", clear_on_submit=False):
         code = st.text_input("股票代码")
         name = st.text_input("股票名称")
         strategy = st.selectbox("策略", strategies)
