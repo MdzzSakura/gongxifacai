@@ -128,3 +128,26 @@ def test_有spot时down_count正确():
     spot = _spot(up=2000, down=1500, flat=200)
     e = compute_market_emotion(_zt([1]), _dt(1), _zb(0), spot_df=spot)
     assert e.down_count == 1500
+
+
+def test_量能_放量():
+    e = compute_market_emotion(_zt([1]), _dt(1), _zb(0),
+                               turnover=1.2e12, turnover_baseline=1.0e12)
+    assert e.volume_state == "放量(1.20)"
+
+
+def test_量能_缩量():
+    e = compute_market_emotion(_zt([1]), _dt(1), _zb(0),
+                               turnover=8.0e11, turnover_baseline=1.0e12)
+    assert e.volume_state == "缩量(0.80)"
+
+
+def test_量能_平量():
+    e = compute_market_emotion(_zt([1]), _dt(1), _zb(0),
+                               turnover=1.0e12, turnover_baseline=1.0e12)
+    assert e.volume_state == "平量(1.00)"
+
+
+def test_量能_缺基准仍数据不足():
+    e = compute_market_emotion(_zt([1]), _dt(1), _zb(0), turnover=1.0e12)
+    assert e.volume_state == "数据不足"

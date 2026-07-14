@@ -11,7 +11,7 @@
 对外接口兼容 'YYYYMMDD' 传参(内部归一)。
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, List, Optional
 
 import duckdb
@@ -197,6 +197,30 @@ class DuckStore:
                WHERE r."日期" = ? AND prev_close IS NOT NULL''',
             [d, d],
         ).df()
+
+    def market_turnover(self, date: str, baseline_days: int = 5) -> tuple:
+        """今日两市总成交额与之前 baseline_days 个有数据交易日的均额。
+
+        返回 (turnover, baseline):当日 daily 无行返回 (None, None);
+        历史有数据交易日不足 baseline_days 天时 baseline 为 None。
+        限窗最近 30 个自然日(覆盖 5 个交易日绰绰有余);全天成交额皆
+        NULL 的日期不计入基准天数。date 兼容 'YYYYMMDD'。
+        """
+        d = dash(date)
+        start = (datetime.strptime(d, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
+        rows = self._con.execute(
+            '''SELECT "日期", sum("成交额") AS total FROM daily
+               WHERE "日期" BETWEEN ? AND ? AND "成交额" IS NOT NULL
+               GROUP BY "日期" ORDER BY "日期" DESC LIMIT ?''',
+            [start, d, baseline_days + 1],
+        ).fetchall()
+        if not rows or rows[0][0] != d or rows[0][1] is None:
+            return None, None
+        turnover = float(rows[0][1])
+        hist = [float(r[1]) for r in rows[1:] if r[1] is not None]
+        if len(hist) < baseline_days:
+            return turnover, None
+        return turnover, sum(hist) / len(hist)
 
     def daily_max_date(self) -> Optional[str]:
         """daily 表最新日期(离线筛选默认目标日);空库返回 None。"""

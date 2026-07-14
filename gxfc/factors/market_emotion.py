@@ -2,7 +2,7 @@
 
 设计意图:盘后一眼看清当日情绪冷热——炸板率判断追涨风险,最高板判断
 市场高度。涨跌家数为可选项,传入全市场 spot_df 后精确统计;否则退为
-用涨跌停池的粗粒度判断。阶段2接入成交额后量能状态将解锁。
+用涨跌停池的粗粒度判断。量能状态由调用方传入两市总成交额与前N日均额后解锁(离线由 daily 表重建)。
 阈值来自用户文档经验值。
 """
 from dataclasses import dataclass
@@ -30,6 +30,10 @@ def compute_market_emotion(
     spot_df: Optional[pd.DataFrame] = None,
     hot_up_count: int = 4500,
     cold_up_count: int = 800,
+    turnover: Optional[float] = None,
+    turnover_baseline: Optional[float] = None,
+    volume_up_ratio: float = 1.15,
+    volume_down_ratio: float = 0.85,
 ) -> MarketEmotion:
     """从三个涨跌停池计算市场情绪指标。
 
@@ -41,6 +45,10 @@ def compute_market_emotion(
                  否则 up_count/down_count 均为 None(调用方可降级)
         hot_up_count: 上涨家数≥此值视为情绪高点(追涨谨慎)
         cold_up_count: 上涨家数≤此值视为接近冰点(关注机会)
+        turnover: 今日两市总成交额(可选)
+        turnover_baseline: 前N日均成交额(可选)
+        volume_up_ratio: 放量阈值倍数(默认1.15,今日≥基准*此值为放量)
+        volume_down_ratio: 缩量阈值倍数(默认0.85,今日≤基准*此值为缩量)
 
     Returns:
         MarketEmotion 情绪指标聚合
@@ -66,8 +74,17 @@ def compute_market_emotion(
         up_count = None
         down_count = None
 
-    # 量能状态:阶段2接入两市成交额后解锁,当前固定"数据不足"
-    volume_state = "数据不足"
+    # 量能状态:今日两市总成交额对前N日均额;任一缺失或基准非正则数据不足
+    if turnover is not None and turnover_baseline is not None and turnover_baseline > 0:
+        ratio = turnover / turnover_baseline
+        if ratio >= volume_up_ratio:
+            volume_state = f"放量({ratio:.2f})"
+        elif ratio <= volume_down_ratio:
+            volume_state = f"缩量({ratio:.2f})"
+        else:
+            volume_state = f"平量({ratio:.2f})"
+    else:
+        volume_state = "数据不足"
 
     # 情绪提示
     if up_count is not None:
