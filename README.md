@@ -48,11 +48,11 @@ gongxifacai/
 │   │   ├── app.py           # Streamlit 应用入口
 │   │   ├── queries.py       # 库读取层（只读短连接）
 │   │   ├── actions.py       # 子进程动作层（调用 CLI）
-│   │   └── pages_/          # 四个页面组件
-│   │       ├── 1_dashboard.py      # 📊 复盘面板
-│   │       ├── 2_tracking.py       # 📈 信号追踪
-│   │       ├── 3_journal.py        # 📝 交易日志
-│   │       └── 4_ingest.py         # ⚙️ 数据采集
+│   │   └── pages_/          # 四个页面渲染模块
+│   │       ├── review.py    # 📊 复盘面板
+│   │       ├── tracking.py  # 📈 信号追踪
+│   │       ├── journal.py   # 📝 交易日志
+│   │       └── ingest.py    # ⚙️ 数据采集
 │   ├── data/
 │   │   ├── fetcher.py       # 多源数据抓取（东财/baostock/新浪，自动回退 + 重试）
 │   │   └── quality.py       # 数据质量校验
