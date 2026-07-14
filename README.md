@@ -17,6 +17,14 @@
 | `python -m gxfc.track` | 信号前向收益追踪：按 策略 × 持有期（T+1/3/5/10）统计胜率、平均收益、盈亏比 | ❌ 只读本地库 |
 | `python -m gxfc.journal add/close/list/stats` | 交易日志：开仓写计划、平仓记执行，输出"计划-执行-纪律"三组对比统计 | ❌ 只写本地库 |
 
+## Web 控制台（本地网页）
+
+```powershell
+python -m streamlit run gxfc/web/app.py
+```
+
+浏览器打开 http://localhost:8501，四个页面：📊 复盘面板（切换日期）、📈 信号追踪（胜率/盈亏比图表）、📝 交易日志（网页开平仓）、⚙️ 数据采集（一键采集+实时日志）。库路径可用环境变量 `GXFC_DB` 覆盖。网页读库走只读短连接、写库走子进程调 CLI，网页开着不影响命令行操作。
+
 ## 内置策略（因子）
 
 - **市场情绪**（`factors/market_emotion.py`）：由涨停池/跌停池/炸板池计算炸板率、最高板等指标，盘后一眼看清情绪冷热。
@@ -36,6 +44,15 @@ gongxifacai/
 │   ├── track.py             # 信号追踪报表 CLI
 │   ├── journal.py           # 交易日志 CLI
 │   ├── dates.py             # 日期工具
+│   ├── web/
+│   │   ├── app.py           # Streamlit 应用入口
+│   │   ├── queries.py       # 库读取层（只读短连接）
+│   │   ├── actions.py       # 子进程动作层（调用 CLI）
+│   │   └── pages_/          # 四个页面组件
+│   │       ├── 1_dashboard.py      # 📊 复盘面板
+│   │       ├── 2_tracking.py       # 📈 信号追踪
+│   │       ├── 3_journal.py        # 📝 交易日志
+│   │       └── 4_ingest.py         # ⚙️ 数据采集
 │   ├── data/
 │   │   ├── fetcher.py       # 多源数据抓取（东财/baostock/新浪，自动回退 + 重试）
 │   │   └── quality.py       # 数据质量校验
@@ -86,7 +103,7 @@ pytest -m network      # 仅跑真实访问 AKShare 的网络测试
 
 ## 技术栈
 
-Python 3 · DuckDB（本地存储）· AKShare / baostock（数据源）· pandas · PyYAML · tabulate · pytest
+Python 3 · DuckDB（本地存储）· AKShare / baostock（数据源）· pandas · PyYAML · tabulate · pytest · Streamlit（本地网页）· plotly（图表）
 
 ## 设计文档
 
@@ -96,3 +113,4 @@ Python 3 · DuckDB（本地存储）· AKShare / baostock（数据源）· panda
 - `specs/2026-06-30-local-data-store-ingest-screen-design.md` — 本地存储与采集/筛选分离
 - `specs/2026-07-07-stable-data-ingest-design.md` — 稳定采集（限流对策、断点续传、除权自愈）
 - `plans/2026-07-07-signal-tracking-and-journal.md` — 信号追踪与交易日志
+- `specs/2026-07-13-web-console-design.md` — Web 控制台（Streamlit 本地网页）
