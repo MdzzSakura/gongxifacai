@@ -10,7 +10,8 @@ _DATE = "2026-07-06"
 _QUARTER = "20260630"
 
 _CONFIG = {
-    "emotion": {"hot_up_count": 4500, "cold_up_count": 800},
+    "emotion": {"hot_up_count": 4500, "cold_up_count": 800,
+                "volume_up_ratio": 1.15, "volume_down_ratio": 0.85},
     "sector": {"top_n": 10, "core_drill_top_n": 3, "core_top_n": 5},
     "profit_fault": {"growth_threshold": 50.0},
     "bottom_volume": {

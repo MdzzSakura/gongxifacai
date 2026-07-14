@@ -61,8 +61,8 @@ def _emotion_offline(store: DuckStore, date: str, emo_cfg: dict) -> MarketEmotio
         cold_up_count=emo_cfg["cold_up_count"],
         turnover=turnover,
         turnover_baseline=baseline,
-        volume_up_ratio=emo_cfg.get("volume_up_ratio"),
-        volume_down_ratio=emo_cfg.get("volume_down_ratio"),
+        volume_up_ratio=emo_cfg["volume_up_ratio"],
+        volume_down_ratio=emo_cfg["volume_down_ratio"],
     )
 
 
