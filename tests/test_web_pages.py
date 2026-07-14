@@ -64,3 +64,21 @@ def test_交易日志页空库(tmp_path, monkeypatch):
     at = at.run()
     assert not at.exception
     assert any("无已平仓交易" in str(i.value) for i in at.info)
+
+
+def test_数据采集页渲染(seeded_db, monkeypatch):
+    at = _run_app(seeded_db, monkeypatch)
+    at.sidebar.radio[0].set_value("⚙️ 数据采集")
+    at = at.run()
+    assert not at.exception
+    labels = [b.label for b in at.button]
+    assert any("开始采集" in x for x in labels)
+    assert any("重跑筛选" in x for x in labels)
+
+
+def test_数据采集页库缺失引导(tmp_path, monkeypatch):
+    at = _run_app(str(tmp_path / "nope.duckdb"), monkeypatch)
+    at.sidebar.radio[0].set_value("⚙️ 数据采集")
+    at = at.run()
+    assert not at.exception
+    assert any("尚不存在" in str(i.value) for i in at.info)
