@@ -164,3 +164,32 @@ def test_run_screen候选自动落库为信号(tmp_path):
         assert j.read_signals(strategy="profit_fault").empty
     finally:
         store.close()
+
+
+def test_量能状态接线(tmp_path):
+    """三池已采集且日K充足时,情绪段量能不再是"数据不足"。"""
+    from gxfc.screen import _emotion_offline
+    store = DuckStore(str(tmp_path / "s.duckdb"))
+    try:
+        days = ["2026-07-01", "2026-07-02", "2026-07-03",
+                "2026-07-06", "2026-07-07", "2026-07-08"]
+        store.append_daily(pd.DataFrame([
+            {"代码": "600000", "日期": d, "开盘": 10.0, "收盘": 10.0, "最高": 10.0,
+             "最低": 10.0, "成交量": 1e6, "成交额": 1e8, "换手率": 1.0}
+            for d in days
+        ]))
+        date = "2026-07-08"
+        store.upsert_snapshot("zt_pool", "trade_date", date,
+                              pd.DataFrame({"代码": ["600000"], "名称": ["甲"],
+                                            "连板数": [1], "炸板次数": [0]}))
+        store.upsert_snapshot("dt_pool", "trade_date", date,
+                              pd.DataFrame({"代码": ["000002"], "名称": ["乙"]}))
+        store.upsert_snapshot("zb_pool", "trade_date", date,
+                              pd.DataFrame({"代码": ["000003"], "名称": ["丙"]}))
+        store.log("t", "zt_pool", date, "ok")
+        emo_cfg = {"hot_up_count": 4500, "cold_up_count": 800,
+                   "volume_up_ratio": 1.15, "volume_down_ratio": 0.85}
+        e = _emotion_offline(store, date, emo_cfg)
+        assert e.volume_state == "平量(1.00)"   # 每日总额相同 → 比值恰为 1
+    finally:
+        store.close()

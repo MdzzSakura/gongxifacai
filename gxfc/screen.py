@@ -43,7 +43,7 @@ def load_config(path: str = "config/strategy.yaml") -> dict:
 
 
 def _emotion_offline(store: DuckStore, date: str, emo_cfg: dict) -> MarketEmotion:
-    """情绪段:三池读快照表,涨跌家数由日K离线重建。未采集则降级标注。"""
+    """情绪段:三池读快照表,涨跌家数由日K离线重建。量能由 daily 表离线重建的两市成交额判定。未采集则降级标注。"""
     if not store.has_ok("zt_pool", date):
         return MarketEmotion(
             up_count=None, down_count=None, limit_up=0, limit_down=0,
@@ -54,10 +54,15 @@ def _emotion_offline(store: DuckStore, date: str, emo_cfg: dict) -> MarketEmotio
     dt = store.read_snapshot("dt_pool", "trade_date", date)
     zb = store.read_snapshot("zb_pool", "trade_date", date)
     pct = store.read_market_pct(date)
+    turnover, baseline = store.market_turnover(date)
     return compute_market_emotion(
         zt, dt, zb, spot_df=pct if not pct.empty else None,
         hot_up_count=emo_cfg["hot_up_count"],
         cold_up_count=emo_cfg["cold_up_count"],
+        turnover=turnover,
+        turnover_baseline=baseline,
+        volume_up_ratio=emo_cfg.get("volume_up_ratio"),
+        volume_down_ratio=emo_cfg.get("volume_down_ratio"),
     )
 
 
