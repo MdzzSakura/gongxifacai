@@ -123,7 +123,7 @@ gxfc/web/
 | `gxfc_data.duckdb` 文件不存在 | app.py 渲染引导页：说明先运行 `python -m gxfc.ingest` |
 | 某表不存在 / 查询无行（signals、trades 未建等） | 对应区块 `st.info` 提示产生该数据的命令，其余区块正常 |
 | 子进程非零退出 | `st.error` 展示命令行与输出尾部；页面数据保持旧值 |
-| 读连接被写者短暂阻塞 | 捕获 duckdb.IOException，`st.warning` 提示"采集进行中，稍后刷新" |
+| 读连接撞上写锁 | DuckDB 读连接遇写锁**立即**抛 `duckdb.IOException`（并非阻塞等待）。采集页运行期间（`gxfc_proc` 存活）直接跳过 `db_overview` 查询以规避撞锁；其余页面／场景仍由 app.py 统一 `except duckdb.IOException` 捕获、`st.warning` 提示"采集进行中，稍后刷新" |
 
 ---
 
