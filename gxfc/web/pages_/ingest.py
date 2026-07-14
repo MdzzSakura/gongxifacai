@@ -63,6 +63,11 @@ def _render_progress() -> None:
         proc.wait()
         st.rerun()
         return
+    # 已结束:快速结束的进程从未进过流式循环,先补读管道中剩余输出
+    # (读已结束进程的 stdout 是安全的,返回缓冲区剩余行直到 EOF)
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            lines.append(line.rstrip())
     st.session_state["gxfc_proc"] = None
     if proc.returncode == 0:
         st.cache_data.clear()             # 数据已更新,面板/追踪缓存作废

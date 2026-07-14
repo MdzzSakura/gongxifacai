@@ -82,3 +82,29 @@ def test_数据采集页库缺失引导(tmp_path, monkeypatch):
     at = at.run()
     assert not at.exception
     assert any("尚不存在" in str(i.value) for i in at.info)
+
+
+def test_数据采集页补读快速结束进程日志(seeded_db, monkeypatch):
+    """快速失败/秒退的子进程从未进过流式循环,已结束分支必须补读管道剩余输出。"""
+    class 快速结束进程:
+        returncode = 0
+
+        def __init__(self):
+            # 模拟已退出但管道缓冲区仍有未读行的子进程
+            self.stdout = iter(["测试日志行\n"])
+
+        def poll(self):
+            return 0
+
+    at = _run_app(seeded_db, monkeypatch)
+    at.sidebar.radio[0].set_value("⚙️ 数据采集")
+    at = at.run()
+    # 注入已结束的假进程,模拟 _launch 后 rerun 到达前进程已退出的时序
+    at.session_state["gxfc_proc"] = 快速结束进程()
+    at.session_state["gxfc_proc_name"] = "筛选"
+    at.session_state["gxfc_proc_log"] = []
+    at = at.run()
+    assert not at.exception
+    assert any("筛选完成" in str(s.value) for s in at.success)
+    # 补读到的日志必须渲染出来,而非"(无输出)"
+    assert any("测试日志行" in str(c.value) for c in at.code)
