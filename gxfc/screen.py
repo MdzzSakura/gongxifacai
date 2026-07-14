@@ -1,7 +1,7 @@
 """离线筛选:只读 DuckDB 组装每日复盘面板,全程零网络请求。
 
-与 gxfc.main(联网一次成型)镜像的离线实现:数据不从 Fetcher 拉,而是读
-gxfc.ingest 落好的本地库。可任意高频重跑、调参数复算,永不触发限流。
+离线复盘链路:数据不从 Fetcher 拉,而是读 gxfc.ingest 落好的本地库。
+可任意高频重跑、调参数复算,永不触发限流。
 某数据集未采集时该段降级并标注,不阻塞整个面板。
 
 本模块**禁止 import gxfc.data.fetcher**——"严格离线"靠依赖关系保证,
@@ -24,9 +24,10 @@ from gxfc.factors.bottom_volume import scan_bottom_volume
 from gxfc.factors.market_emotion import MarketEmotion, compute_market_emotion
 from gxfc.factors.profit_fault import passes_growth, scan_profit_fault
 from gxfc.factors.sector import core_stocks, rank_sectors
-from gxfc.ingest import derive_quarter_end
+from gxfc.dates import dash, derive_quarter_end
 from gxfc.review.daily_board import DailyBoard, render_console, save_csv
-from gxfc.store.duck_store import DuckStore, _dash
+from gxfc.store.duck_store import DuckStore
+from gxfc.store.journal_store import JournalStore
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ def _profit_fault_offline(store: DuckStore, date: str, quarter_end: str,
                 high_growth_codes.add(code)
 
     yjyg = yjyg_full.head(top_codes_limit)
-    end_dt = datetime.strptime(_dash(date), "%Y-%m-%d")
+    end_dt = datetime.strptime(dash(date), "%Y-%m-%d")
     start = (end_dt - timedelta(days=_FAULT_WINDOW_DAYS)).strftime("%Y-%m-%d")
     daily_map = {}
     for code in dict.fromkeys(str(c) for c in yjyg["股票代码"] if c):
@@ -122,7 +123,7 @@ def _surge_offline(store: DuckStore, date: str, config: dict, high_growth_codes:
     if hit > max_survivors:
         logger.warning("底部爆量:命中 %d 只超上限,按涨幅取前 %d 只精算", hit, max_survivors)
 
-    end_dt = datetime.strptime(_dash(date), "%Y-%m-%d")
+    end_dt = datetime.strptime(dash(date), "%Y-%m-%d")
     start = (end_dt - timedelta(days=_SURGE_WINDOW_DAYS)).strftime("%Y-%m-%d")
     prev_day = (end_dt - timedelta(days=1)).strftime("%Y-%m-%d")
     daily_map = {}
@@ -144,7 +145,7 @@ def _surge_offline(store: DuckStore, date: str, config: dict, high_growth_codes:
 def build_board_offline(store: DuckStore, date: str, quarter_end: str, config: dict,
                         top_codes_limit: int = 20) -> DailyBoard:
     """从本地库组装每日面板。各段独立降级:某数据集未采集只影响该段。"""
-    date = _dash(date)
+    date = dash(date)
     emotion = _emotion_offline(store, date, config["emotion"])
     sectors, sector_cores = _sectors_offline(store, date, config["sector"])
     candidates, high_growth = _profit_fault_offline(
@@ -164,7 +165,7 @@ def run_screen(date: Optional[str] = None, db_path: str = "gxfc_data.duckdb",
     config = load_config()
     store = DuckStore(db_path)
     try:
-        target = _dash(date) if date else store.daily_max_date()
+        target = dash(date) if date else store.daily_max_date()
         if target is None:
             raise SystemExit("本地库无日K数据,请先运行 python -m gxfc.ingest")
         quarter_end = derive_quarter_end(target)
@@ -172,6 +173,11 @@ def run_screen(date: Optional[str] = None, db_path: str = "gxfc_data.duckdb",
         print(render_console(board))
         paths = save_csv(board, out_dir)
         logger.info("已保存:%s", paths)
+        journal = JournalStore(store.con)
+        pf = board.candidates.rename(columns={"股票代码": "代码", "股票简称": "名称"})
+        n_pf = journal.record_signals(target, "profit_fault", pf)
+        n_bv = journal.record_signals(target, "bottom_volume", board.surge_candidates)
+        logger.info("信号落库:断层 %d 条,底部爆量 %d 条(重跑同日自动覆盖)", n_pf, n_bv)
         return board
     finally:
         store.close()

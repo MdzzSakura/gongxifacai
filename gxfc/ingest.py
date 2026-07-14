@@ -22,7 +22,8 @@ import yaml
 
 from gxfc.data.fetcher import Fetcher
 from gxfc.data.quality import validate
-from gxfc.store.duck_store import DuckStore, _dash
+from gxfc.dates import dash, derive_quarter_end, ymd
+from gxfc.store.duck_store import DuckStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +39,6 @@ _CLOSE_HOUR, _CLOSE_MINUTE = 15, 5
 
 class IngestAborted(RuntimeError):
     """连续失败超预算,本轮采集中止(已入库数据保留,重跑续传)。"""
-
-
-def _ymd(date: str) -> str:
-    """'YYYY-MM-DD' → 'YYYYMMDD'(fetcher 侧口径)。"""
-    return _dash(date).replace("-", "")
-
-
-def derive_quarter_end(date: str) -> str:
-    """按目标日推导业绩预告对应的季度末(最近一个 ≤ 目标日的季末,'YYYYMMDD')。"""
-    d = datetime.strptime(_ymd(date), "%Y%m%d")
-    for m, day in ((12, 31), (9, 30), (6, 30), (3, 31)):
-        q = datetime(d.year, m, day)
-        if q <= d:
-            return q.strftime("%Y%m%d")
-    return f"{d.year - 1}1231"
 
 
 def refresh_calendar(fetcher: Fetcher, store: DuckStore, now: datetime) -> None:
@@ -103,12 +89,12 @@ def ingest_snapshots(fetcher: Fetcher, store: DuckStore, run_id: str,
 
     板块榜/成分股是实时接口,无法追溯历史,仅当目标日就是最新交易日时采集。
     """
-    ymd = _ymd(date)
+    date_ymd = ymd(date)
     quarter_end = derive_quarter_end(date)
     jobs = [
-        ("zt_pool", date, lambda: fetcher.zt_pool(ymd), "东财"),
-        ("dt_pool", date, lambda: fetcher.dt_pool(ymd), "东财"),
-        ("zb_pool", date, lambda: fetcher.zb_pool(ymd), "东财"),
+        ("zt_pool", date, lambda: fetcher.zt_pool(date_ymd), "东财"),
+        ("dt_pool", date, lambda: fetcher.dt_pool(date_ymd), "东财"),
+        ("zb_pool", date, lambda: fetcher.zb_pool(date_ymd), "东财"),
         ("yjyg", quarter_end, lambda: fetcher.yjyg(quarter_end), "东财"),
     ]
     for dataset, period, loader, source in jobs:
@@ -246,16 +232,16 @@ def ingest_backfill(fetcher: Fetcher, store: DuckStore, run_id: str, date: str,
         return {"total": 0, "ok": 0, "fail": 0, "skipped_bj": 0}
     last = store.daily_last_close().set_index("代码")["日期"] if len(universe) else pd.Series(dtype=str)
     hist_done = store.ok_periods("daily_hist")
-    default_start = (datetime.strptime(_ymd(date), "%Y%m%d")
+    default_start = (datetime.strptime(ymd(date), "%Y%m%d")
                      - timedelta(days=_BACKFILL_NATURAL_DAYS)).strftime("%Y%m%d")
-    target_ymd = _ymd(date)
+    target_ymd = ymd(date)
 
     gap_codes = []
     for code in universe:
         last_date = last.get(code)
         if code not in hist_done:
             gap_codes.append((code, None))            # 深度回补:整段默认窗口
-        elif last_date is None or last_date < _dash(date):
+        elif last_date is None or last_date < dash(date):
             gap_codes.append((code, last_date))       # 缺口回补:增量窗口
     # 北交所仅东财一源,排到最后:东财熔断时它们必然失败,不应拖垮沪深回补
     gap_codes.sort(key=lambda x: x[0].startswith(("4", "8", "92")))
@@ -324,7 +310,7 @@ def run_ingest(date: Optional[str] = None, db_path: str = "gxfc_data.duckdb",
     try:
         refresh_calendar(fetcher, store, now)
         latest = latest_closed_trading_day(store, now)
-        target = _dash(date) if date else latest
+        target = dash(date) if date else latest
         if target not in store.trading_days(target, target):
             logger.warning("%s 非交易日,退出", target)
             return store.run_summary(run_id)

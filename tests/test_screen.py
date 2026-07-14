@@ -2,8 +2,9 @@
 import pandas as pd
 import pytest
 
-from gxfc.screen import build_board_offline
+from gxfc.screen import build_board_offline, run_screen
 from gxfc.store.duck_store import DuckStore
+from gxfc.store.journal_store import JournalStore
 
 _DATE = "2026-07-06"
 _QUARTER = "20260630"
@@ -125,3 +126,41 @@ def test_底部爆量段离线组装_历史严格取当日之前(store):
     assert list(surge["代码"]) == ["600010"]
     assert surge.iloc[0]["量比"] == pytest.approx(5.0)   # 量比只用之前5日均量,不含当日
     assert surge.iloc[0]["业绩高增"] is False or surge.iloc[0]["业绩高增"] == False  # noqa: E712
+
+
+def _daily_rows_for_surge():
+    """构造一只票:低位横盘 6 日后,目标日放量 10 倍大涨 10%,命中底部爆量三条件。"""
+    cols = ["代码", "日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"]
+    rows = [
+        ["600000", "2026-06-29", 19.0, 19.0, 20.0, 18.5, 100, 1900, 1.0],
+        ["600000", "2026-06-30", 13.0, 12.0, 12.5, 11.8, 100, 1200, 1.0],
+        ["600000", "2026-07-01", 12.0, 11.0, 11.2, 10.8, 100, 1100, 1.0],
+        ["600000", "2026-07-02", 11.0, 10.5, 10.8, 10.3, 100, 1050, 1.0],
+        ["600000", "2026-07-03", 10.5, 10.2, 10.4, 10.0, 100, 1020, 1.0],
+        ["600000", "2026-07-06", 10.2, 10.0, 10.2, 9.9, 100, 1000, 1.0],
+        # 目标日:涨幅 +10%(≥7),量比 1000/100=10(≥2),收11 ≤ 前高20×0.6=12(底部)
+        ["600000", "2026-07-07", 10.0, 11.0, 11.1, 10.0, 1000, 11000, 5.0],
+    ]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def test_run_screen候选自动落库为信号(tmp_path):
+    db = str(tmp_path / "t.duckdb")
+    store = DuckStore(db)
+    store.upsert_calendar(["2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02",
+                           "2026-07-03", "2026-07-06", "2026-07-07"])
+    store.append_daily(_daily_rows_for_surge())
+    store.close()
+
+    run_screen(date="20260707", db_path=db, out_dir=str(tmp_path / "out"))
+
+    store = DuckStore(db)
+    try:
+        j = JournalStore(store.con)
+        surge = j.read_signals(strategy="bottom_volume")
+        assert list(surge["代码"]) == ["600000"]
+        assert surge.iloc[0]["signal_date"] == "2026-07-07"
+        # 断层段无业绩预告数据 → 空信号但不报错
+        assert j.read_signals(strategy="profit_fault").empty
+    finally:
+        store.close()

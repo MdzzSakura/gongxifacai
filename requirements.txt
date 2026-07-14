@@ -5,3 +5,5 @@ tabulate>=0.9
 pytest>=7.0
 duckdb>=0.10
 baostock>=0.8
+streamlit>=1.35
+plotly>=5.20
